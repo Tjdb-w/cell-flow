@@ -7,7 +7,7 @@ from . import __version__
 from .errors import CellFlowConfigError, CellFlowDataError
 from .io import ExpressionMatrix, read_matrix
 from .kmeans import kmeans
-from .markers import find_markers
+from .markers import find_markers, find_pairwise_markers
 from .normalize import normalize_and_select_hvg
 from .output import Artifacts, ensure_output_dir, write_results
 from .pca import MAX_PCS, run_pca
@@ -122,6 +122,10 @@ def run(config: Config) -> List[str]:
 
     markers = find_markers(normalized, clustering.labels)
 
+    # 能执行到此处说明实际簇数 >= 2（上方已对不足两簇的数据错误拒绝），
+    # 成对比较覆盖实际出现标签的全部 a < b 组合
+    pairwise_markers = find_pairwise_markers(normalized, clustering.labels)
+
     cluster_sizes: Dict[int, int] = {}
     for label in clustering.labels:
         cluster_sizes[label] = cluster_sizes.get(label, 0) + 1
@@ -160,6 +164,7 @@ def run(config: Config) -> List[str]:
         pca=pca,
         clustering=clustering,
         markers=markers,
+        pairwise_markers=pairwise_markers,
         run_info=run_info,
     )
     # 全部计算已完成，此处才创建/校验输出目录并原子写出

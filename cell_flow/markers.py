@@ -1,4 +1,4 @@
-"""逐簇差异表达：每个簇对比其余所有细胞。
+"""逐簇差异表达：每个簇对比其余所有细胞，以及任意两个已得到簇之间的成对比较。
 
 对每个（簇, 基因）输出：
 - 两组在 log-归一化表达上的平均表达量；
@@ -6,10 +6,13 @@
 - Welch t 检验统计量与双侧 P 值；
 - 每个簇内跨基因的 Benjamini-Hochberg 校正 P 值。
 排序：校正 P 值升序、对数倍数变化降序、基因 ID 升序。
+
+成对比较对实际出现的每一对簇 (a, b)（a < b，case 为 a、control 为 b）
+执行同一口径的逐基因检验，并在每个比较内部跨基因做 BH 校正。
 """
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from .linalg import benjamini_hochberg, welch_ttest
 from .normalize import NormalizedData
@@ -84,3 +87,83 @@ def find_markers(
         records.sort(key=lambda r: (r.p_value_adj, -r.log_fc, r.gene_id))
         results[cluster] = records
     return results
+
+
+@dataclass(frozen=True)
+class PairwiseMarkerRecord:
+    cluster_a: int
+    cluster_b: int
+    gene_id: str
+    mean_in_a: float
+    mean_in_b: float
+    log_fc_a_vs_b: float
+    t_stat: float
+    p_value: float
+    p_value_adj: float
+
+
+def find_pairwise_markers(
+    data: NormalizedData, labels: List[int]
+) -> List[Tuple[int, int, List[PairwiseMarkerRecord]]]:
+    """每一对实际出现的簇 (a, b)（a < b）之间的逐基因差异表达。
+
+    返回按 (cluster_a, cluster_b) 升序的比较列表；每个比较内的记录按
+    校正 P 值升序、log_fc_a_vs_b 降序、基因 ID 升序稳定排序。
+    BH 校正以单个比较内的全部保留基因为一个校正家族。
+    """
+    cluster_to_cells: Dict[int, List[int]] = {}
+    for c, label in enumerate(labels):
+        cluster_to_cells.setdefault(label, []).append(c)
+
+    present = sorted(cluster_to_cells)
+    comparisons: List[Tuple[int, int, List[PairwiseMarkerRecord]]] = []
+    for i, cluster_a in enumerate(present):
+        for cluster_b in present[i + 1:]:
+            cells_a = cluster_to_cells[cluster_a]
+            cells_b = cluster_to_cells[cluster_b]
+
+            records: List[PairwiseMarkerRecord] = []
+            pvalues: List[float] = []
+            for g, gene_id in enumerate(data.gene_ids):
+                row = data.values[g]
+                group_a = [row[c] for c in cells_a]
+                group_b = [row[c] for c in cells_b]
+                mean_a = sum(group_a) / len(group_a)
+                mean_b = sum(group_b) / len(group_b)
+                log_fc = mean_a - mean_b
+                t_stat, p_value = welch_ttest(group_a, group_b)
+                pvalues.append(p_value)
+                records.append(
+                    PairwiseMarkerRecord(
+                        cluster_a=cluster_a,
+                        cluster_b=cluster_b,
+                        gene_id=gene_id,
+                        mean_in_a=mean_a,
+                        mean_in_b=mean_b,
+                        log_fc_a_vs_b=log_fc,
+                        t_stat=t_stat,
+                        p_value=p_value,
+                        p_value_adj=0.0,
+                    )
+                )
+
+            adjusted = benjamini_hochberg(pvalues)
+            records = [
+                PairwiseMarkerRecord(
+                    cluster_a=r.cluster_a,
+                    cluster_b=r.cluster_b,
+                    gene_id=r.gene_id,
+                    mean_in_a=r.mean_in_a,
+                    mean_in_b=r.mean_in_b,
+                    log_fc_a_vs_b=r.log_fc_a_vs_b,
+                    t_stat=r.t_stat,
+                    p_value=r.p_value,
+                    p_value_adj=adjusted[g],
+                )
+                for g, r in enumerate(records)
+            ]
+            records.sort(
+                key=lambda r: (r.p_value_adj, -r.log_fc_a_vs_b, r.gene_id)
+            )
+            comparisons.append((cluster_a, cluster_b, records))
+    return comparisons

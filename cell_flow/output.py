@@ -7,14 +7,15 @@
 """
 
 import json
+import math
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Tuple
 
 from .errors import OutputPathError
 from .kmeans import KMeansResult
-from .markers import MarkerRecord
+from .markers import MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
 from .pca import PCAResult
 from .qc import QCResult
@@ -43,6 +44,7 @@ class Artifacts:
     pca: PCAResult
     clustering: KMeansResult
     markers: Dict[int, List[MarkerRecord]]
+    pairwise_markers: List[Tuple[int, int, List[PairwiseMarkerRecord]]]
     run_info: Dict[str, Any]
 
 
@@ -320,6 +322,86 @@ def _top_marker_expression_tsv(
     return "\n".join(lines) + "\n"
 
 
+def _neg_log10_p_adj(p_value_adj: float) -> str:
+    if p_value_adj == 0.0:
+        return "inf"
+    if p_value_adj == 1.0:
+        return "0"
+    return fmt_float(-math.log10(p_value_adj))
+
+
+def _pairwise_markers_tsv(
+    comparisons: List[Tuple[int, int, List[PairwiseMarkerRecord]]],
+) -> str:
+    lines = [
+        tsv_row(
+            [
+                "cluster_a",
+                "cluster_b",
+                "gene_id",
+                "mean_in_a",
+                "mean_in_b",
+                "log_fc_a_vs_b",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for cluster_a, cluster_b, records in comparisons:
+        for r in records:
+            lines.append(
+                tsv_row(
+                    [
+                        cluster_a,
+                        cluster_b,
+                        r.gene_id,
+                        fmt_float(r.mean_in_a),
+                        fmt_float(r.mean_in_b),
+                        fmt_float(r.log_fc_a_vs_b),
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _pairwise_marker_chart_tsv(
+    comparisons: List[Tuple[int, int, List[PairwiseMarkerRecord]]],
+) -> str:
+    lines = [
+        tsv_row(
+            [
+                "cluster_a",
+                "cluster_b",
+                "gene_id",
+                "log_fc_a_vs_b",
+                "p_value",
+                "p_value_adj",
+                "neg_log10_p_adj",
+            ]
+        )
+    ]
+    for cluster_a, cluster_b, records in comparisons:
+        for r in records:
+            lines.append(
+                tsv_row(
+                    [
+                        cluster_a,
+                        cluster_b,
+                        r.gene_id,
+                        fmt_float(r.log_fc_a_vs_b),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                        _neg_log10_p_adj(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
 def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
@@ -364,6 +446,14 @@ def write_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                 artifacts.clustering,
                 artifacts.markers,
             ),
+        ),
+        (
+            "pairwise_markers.tsv",
+            _pairwise_markers_tsv(artifacts.pairwise_markers),
+        ),
+        (
+            "pairwise_marker_chart.tsv",
+            _pairwise_marker_chart_tsv(artifacts.pairwise_markers),
         ),
         ("run.json", _run_json(artifacts.run_info)),
     ]
