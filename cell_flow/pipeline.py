@@ -10,6 +10,7 @@ from .kmeans import kmeans
 from .markers import find_markers
 from .normalize import normalize_and_select_hvg
 from .output import Artifacts, ensure_output_dir, write_results
+from .pairwise import find_pairwise_markers
 from .pca import MAX_PCS, run_pca
 from .qc import compute_qc
 
@@ -121,6 +122,7 @@ def run(config: Config) -> List[str]:
         )
 
     markers = find_markers(normalized, clustering.labels)
+    pairwise_markers = find_pairwise_markers(normalized, clustering.labels)
 
     cluster_sizes: Dict[int, int] = {}
     for label in clustering.labels:
@@ -160,6 +162,7 @@ def run(config: Config) -> List[str]:
         pca=pca,
         clustering=clustering,
         markers=markers,
+        pairwise_markers=pairwise_markers,
         run_info=run_info,
     )
     # 全部计算已完成，此处才创建/校验输出目录并原子写出

@@ -7,6 +7,7 @@
 """
 
 import json
+import math
 import os
 import tempfile
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from .errors import OutputPathError
 from .kmeans import KMeansResult
 from .markers import MarkerRecord
 from .normalize import NormalizedData
+from .pairwise import PairwiseMarkerRecord
 from .pca import PCAResult
 from .qc import QCResult
 
@@ -43,6 +45,7 @@ class Artifacts:
     pca: PCAResult
     clustering: KMeansResult
     markers: Dict[int, List[MarkerRecord]]
+    pairwise_markers: List[PairwiseMarkerRecord]
     run_info: Dict[str, Any]
 
 
@@ -324,6 +327,81 @@ def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
 
+def _neg_log10(value: float) -> str:
+    """-log10(p) 的确定文本：p==0 -> inf，p==1 -> 0，其余取负对数。"""
+    if value <= 0.0:
+        return "inf"
+    if value >= 1.0:
+        return "0"
+    return fmt_float(-math.log10(value))
+
+
+def _pairwise_markers_tsv(records: List[PairwiseMarkerRecord]) -> str:
+    lines = [
+        tsv_row(
+            [
+                "cluster_a",
+                "cluster_b",
+                "gene_id",
+                "mean_in_a",
+                "mean_in_b",
+                "log_fc_a_vs_b",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for r in records:
+        lines.append(
+            tsv_row(
+                [
+                    r.cluster_a,
+                    r.cluster_b,
+                    r.gene_id,
+                    fmt_float(r.mean_in_a),
+                    fmt_float(r.mean_in_b),
+                    fmt_float(r.log_fc),
+                    fmt_float(r.t_stat),
+                    fmt_float(r.p_value),
+                    fmt_float(r.p_value_adj),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _pairwise_marker_chart_tsv(records: List[PairwiseMarkerRecord]) -> str:
+    lines = [
+        tsv_row(
+            [
+                "cluster_a",
+                "cluster_b",
+                "gene_id",
+                "log_fc_a_vs_b",
+                "p_value",
+                "p_value_adj",
+                "neg_log10_p_adj",
+            ]
+        )
+    ]
+    for r in records:
+        lines.append(
+            tsv_row(
+                [
+                    r.cluster_a,
+                    r.cluster_b,
+                    r.gene_id,
+                    fmt_float(r.log_fc),
+                    fmt_float(r.p_value),
+                    fmt_float(r.p_value_adj),
+                    _neg_log10(r.p_value_adj),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
 def ensure_output_dir(output_dir: str) -> None:
     """目录不存在则创建；存在且非空则抛错；存在且为空则复用。"""
     if output_dir is None or output_dir == "":
@@ -364,6 +442,14 @@ def write_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                 artifacts.clustering,
                 artifacts.markers,
             ),
+        ),
+        (
+            "pairwise_markers.tsv",
+            _pairwise_markers_tsv(artifacts.pairwise_markers),
+        ),
+        (
+            "pairwise_marker_chart.tsv",
+            _pairwise_marker_chart_tsv(artifacts.pairwise_markers),
         ),
         ("run.json", _run_json(artifacts.run_info)),
     ]
