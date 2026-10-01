@@ -4,7 +4,7 @@
 
     cell-flow analyze --input <表达矩阵.tsv> --output-dir <结果目录> \\
         [--min-genes 200] [--max-mito-fraction 0.2] [--min-cells 3] \\
-        [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2] [--seed 20240617]
+        [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617]
 """
 
 import sys
@@ -19,7 +19,7 @@ USAGE = (
     "用法：cell-flow analyze --input <表达矩阵.tsv> --output-dir <结果目录>\n"
     "                [--min-genes N] [--max-mito-fraction F] [--min-cells N]\n"
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
-    "                [--n-clusters N] [--seed N]\n"
+    "                [--n-clusters N|auto] [--seed N]\n"
     "      cell-flow --version"
 )
 
@@ -49,6 +49,12 @@ def _parse_float(name: str, raw: str) -> float:
     return value
 
 
+def _parse_n_clusters(raw: str):
+    if raw == "auto":
+        return "auto"
+    return _parse_int("--n-clusters", raw)
+
+
 def _build_analyze_config(options: dict) -> Config:
     if options.get("input") is None:
         raise _fail_usage("缺少必需参数 --input")
@@ -65,7 +71,7 @@ def _build_analyze_config(options: dict) -> Config:
         mito_prefix=options["mito_prefix"],
         n_hvg=_parse_int("--n-hvg", options["n_hvg"]),
         n_pcs=_parse_int("--n-pcs", options["n_pcs"]),
-        n_clusters=_parse_int("--n-clusters", options["n_clusters"]),
+        n_clusters=_parse_n_clusters(options["n_clusters"]),
         seed=_parse_int("--seed", options["seed"]),
     )
 

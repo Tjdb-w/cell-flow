@@ -11,7 +11,7 @@ import math
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .errors import OutputPathError
 from .kmeans import KMeansResult
@@ -19,6 +19,7 @@ from .markers import MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
 from .pca import PCAResult
 from .qc import QCResult
+from .selection import SelectionResult
 
 TOP_N_MARKERS = 20
 HIST_BINS = 20
@@ -46,6 +47,7 @@ class Artifacts:
     markers: Dict[int, List[MarkerRecord]]
     pairwise_markers: List[Tuple[int, int, List[PairwiseMarkerRecord]]]
     run_info: Dict[str, Any]
+    selection: Optional[SelectionResult] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -402,6 +404,38 @@ def _pairwise_marker_chart_tsv(
     return "\n".join(lines) + "\n"
 
 
+def _cluster_selection_tsv(selection: SelectionResult) -> str:
+    # 候选已按 k 升序产生；selected 仅在被选行写 true
+    lines = [
+        tsv_row(
+            [
+                "k",
+                "formed_clusters",
+                "valid",
+                "iterations",
+                "within_cluster_sse",
+                "mean_silhouette",
+                "selected",
+            ]
+        )
+    ]
+    for cand in selection.candidates:
+        lines.append(
+            tsv_row(
+                [
+                    cand.k,
+                    cand.formed_clusters,
+                    fmt_bool(cand.valid),
+                    cand.iterations,
+                    fmt_float(cand.within_cluster_sse),
+                    fmt_float(cand.mean_silhouette),
+                    fmt_bool(cand.valid and cand.k == selection.selected),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
@@ -455,8 +489,13 @@ def write_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             "pairwise_marker_chart.tsv",
             _pairwise_marker_chart_tsv(artifacts.pairwise_markers),
         ),
-        ("run.json", _run_json(artifacts.run_info)),
     ]
+    # 仅自动选簇模式输出候选扫描表；整数模式结果文件保持原样
+    if artifacts.selection is not None:
+        payload.append(
+            ("cluster_selection.tsv", _cluster_selection_tsv(artifacts.selection))
+        )
+    payload.append(("run.json", _run_json(artifacts.run_info)))
 
     temp_paths: List[str] = []
     final_names: List[str] = []

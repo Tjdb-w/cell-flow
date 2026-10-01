@@ -1,7 +1,7 @@
 """分析管线编排：参数校验 -> 读入 -> QC -> 归一化/HVG -> PCA -> 聚类 -> 差异表达 -> 写出。"""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 from . import __version__
 from .errors import CellFlowConfigError, CellFlowDataError
@@ -12,8 +12,10 @@ from .normalize import normalize_and_select_hvg
 from .output import Artifacts, ensure_output_dir, write_results
 from .pca import MAX_PCS, run_pca
 from .qc import compute_qc
+from .selection import SelectionResult, select_clustering
 
 DEFAULT_SEED = 20240617
+AUTO_N_CLUSTERS = "auto"
 
 
 @dataclass(frozen=True)
@@ -26,7 +28,7 @@ class Config:
     mito_prefix: str = "MT-"
     n_hvg: int = 2000
     n_pcs: int = MAX_PCS
-    n_clusters: int = 2
+    n_clusters: Union[int, str] = 2
     seed: int = DEFAULT_SEED
 
     def public_parameters(self) -> Dict[str, Any]:
@@ -61,8 +63,15 @@ def validate_config(config: Config) -> None:
         errors.append("--n-hvg 必须是 >= 1 的整数")
     if not isinstance(config.n_pcs, int) or config.n_pcs < 1:
         errors.append("--n-pcs 必须是 >= 1 的整数")
-    if not isinstance(config.n_clusters, int) or config.n_clusters < 2:
-        errors.append("--n-clusters 必须是 >= 2 的整数")
+    if (
+        config.n_clusters != AUTO_N_CLUSTERS
+        and (
+            not isinstance(config.n_clusters, int)
+            or isinstance(config.n_clusters, bool)
+            or config.n_clusters < 2
+        )
+    ):
+        errors.append("--n-clusters 必须是 >= 2 的整数或 auto")
     if not isinstance(config.seed, int) or isinstance(config.seed, bool):
         errors.append("--seed 必须是整数")
     if errors:
@@ -93,7 +102,7 @@ def run(config: Config) -> List[str]:
         raise CellFlowDataError(
             f"没有基因在至少 {config.min_cells} 个细胞中检出，无可用基因"
         )
-    if config.n_clusters > n_kept_cells:
+    if config.n_clusters != AUTO_N_CLUSTERS and config.n_clusters > n_kept_cells:
         raise CellFlowDataError(
             f"簇数 {config.n_clusters} 大于质控后细胞数 {n_kept_cells}，聚类无法成立"
         )
@@ -107,18 +116,25 @@ def run(config: Config) -> List[str]:
     except ValueError as exc:
         raise CellFlowDataError(f"PCA 无法成立：{exc}") from exc
 
-    try:
-        clustering = kmeans(pca.scores, config.n_clusters, config.seed)
-    except ValueError as exc:
-        raise CellFlowDataError(f"聚类无法成立：{exc}") from exc
+    selection: "SelectionResult | None"
+    if config.n_clusters == AUTO_N_CLUSTERS:
+        # 在质控后细胞的 PCA 坐标上扫描候选 k；无有效候选时抛 CellFlowDataError
+        selection = select_clustering(pca.scores, config.seed)
+        clustering = selection.clustering
+    else:
+        try:
+            clustering = kmeans(pca.scores, config.n_clusters, config.seed)
+        except ValueError as exc:
+            raise CellFlowDataError(f"聚类无法成立：{exc}") from exc
 
-    n_found_clusters = len(set(clustering.labels))
-    if n_found_clusters < config.n_clusters:
-        # 例如全部细胞表达相同：中心必然重合，无法形成 k 个不同簇
-        raise CellFlowDataError(
-            f"聚类无法成立：请求 {config.n_clusters} 个簇，"
-            f"但数据仅能支撑 {n_found_clusters} 个不同簇（方差不足）"
-        )
+        n_found_clusters = len(set(clustering.labels))
+        if n_found_clusters < config.n_clusters:
+            # 例如全部细胞表达相同：中心必然重合，无法形成 k 个不同簇
+            raise CellFlowDataError(
+                f"聚类无法成立：请求 {config.n_clusters} 个簇，"
+                f"但数据仅能支撑 {n_found_clusters} 个不同簇（方差不足）"
+            )
+        selection = None
 
     markers = find_markers(normalized, clustering.labels)
 
@@ -166,6 +182,7 @@ def run(config: Config) -> List[str]:
         markers=markers,
         pairwise_markers=pairwise_markers,
         run_info=run_info,
+        selection=selection,
     )
     # 全部计算已完成，此处才创建/校验输出目录并原子写出
     ensure_output_dir(config.output_dir)
