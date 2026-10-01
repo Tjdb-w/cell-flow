@@ -11,7 +11,7 @@ import math
 import os
 import tempfile
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .errors import OutputPathError
 from .kmeans import KMeansResult
@@ -19,6 +19,7 @@ from .markers import MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
 from .pca import PCAResult
 from .qc import QCResult
+from .selection import ClusterSelectionResult
 
 TOP_N_MARKERS = 20
 HIST_BINS = 20
@@ -46,6 +47,7 @@ class Artifacts:
     markers: Dict[int, List[MarkerRecord]]
     pairwise_markers: List[Tuple[int, int, List[PairwiseMarkerRecord]]]
     run_info: Dict[str, Any]
+    cluster_selection: Optional[ClusterSelectionResult] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -406,6 +408,38 @@ def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
 
+def _cluster_selection_tsv(selection: ClusterSelectionResult) -> str:
+    # 候选按 k 升序；布尔 true/false；浮点最短往返；无效行两项指标 nan
+    lines = [
+        tsv_row(
+            [
+                "k",
+                "formed_clusters",
+                "valid",
+                "iterations",
+                "within_cluster_sse",
+                "mean_silhouette",
+                "selected",
+            ]
+        )
+    ]
+    for row in selection.rows:
+        lines.append(
+            tsv_row(
+                [
+                    row.k,
+                    row.formed_clusters,
+                    fmt_bool(row.valid),
+                    row.iterations,
+                    fmt_float(row.within_cluster_sse),
+                    fmt_float(row.mean_silhouette),
+                    fmt_bool(row.selected),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
 def ensure_output_dir(output_dir: str) -> None:
     """目录不存在则创建；存在且非空则抛错；存在且为空则复用。"""
     if output_dir is None or output_dir == "":
@@ -455,8 +489,16 @@ def write_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             "pairwise_marker_chart.tsv",
             _pairwise_marker_chart_tsv(artifacts.pairwise_markers),
         ),
-        ("run.json", _run_json(artifacts.run_info)),
     ]
+    # 仅 --n-clusters auto 产出候选评估表；显式整数模式文件集与基线一致
+    if artifacts.cluster_selection is not None:
+        payload.append(
+            (
+                "cluster_selection.tsv",
+                _cluster_selection_tsv(artifacts.cluster_selection),
+            )
+        )
+    payload.append(("run.json", _run_json(artifacts.run_info)))
 
     temp_paths: List[str] = []
     final_names: List[str] = []
