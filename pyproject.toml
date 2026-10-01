@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cell-flow"
+version = "0.1.0"
+description = "从零实现的单细胞表达矩阵分析管线：质控、归一化、PCA、聚类与差异表达"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Cell Flow" }]
+dependencies = []
+
+[project.scripts]
+cell-flow = "cell_flow.cli:main"
+
+[tool.setuptools]
+packages = ["cell_flow"]

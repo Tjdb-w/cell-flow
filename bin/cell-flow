@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# 免安装运行包装器：把仓库根目录加入 PYTHONPATH 后调用 cell_flow.cli。
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+exec python3 -m cell_flow "$@"
