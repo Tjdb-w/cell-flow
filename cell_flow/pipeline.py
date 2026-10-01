@@ -25,6 +25,7 @@ class Config:
     min_cells: int = 3
     mito_prefix: str = "MT-"
     n_hvg: int = 2000
+    n_pcs: int = MAX_PCS
     n_clusters: int = 2
     seed: int = DEFAULT_SEED
 
@@ -35,6 +36,7 @@ class Config:
             "min_cells": self.min_cells,
             "mito_prefix": self.mito_prefix,
             "n_hvg": self.n_hvg,
+            "n_pcs": self.n_pcs,
             "n_clusters": self.n_clusters,
             "seed": self.seed,
         }
@@ -57,6 +59,8 @@ def validate_config(config: Config) -> None:
         errors.append("--mito-prefix 必须是非空字符串")
     if not isinstance(config.n_hvg, int) or config.n_hvg < 1:
         errors.append("--n-hvg 必须是 >= 1 的整数")
+    if not isinstance(config.n_pcs, int) or config.n_pcs < 1:
+        errors.append("--n-pcs 必须是 >= 1 的整数")
     if not isinstance(config.n_clusters, int) or config.n_clusters < 2:
         errors.append("--n-clusters 必须是 >= 2 的整数")
     if not isinstance(config.seed, int) or isinstance(config.seed, bool):
@@ -99,7 +103,7 @@ def run(config: Config) -> List[str]:
         raise CellFlowDataError("高变基因选择结果为空，PCA 无法成立")
 
     try:
-        pca = run_pca(normalized)
+        pca = run_pca(normalized, config.n_pcs)
     except ValueError as exc:
         raise CellFlowDataError(f"PCA 无法成立：{exc}") from exc
 

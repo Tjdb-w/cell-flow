@@ -12,13 +12,14 @@ from typing import Optional, Sequence
 
 from . import __version__
 from .errors import CellFlowError
+from .pca import MAX_PCS
 from .pipeline import DEFAULT_SEED, Config, run
 
 USAGE = (
     "用法：cell-flow analyze --input <表达矩阵.tsv> --output-dir <结果目录>\n"
     "                [--min-genes N] [--max-mito-fraction F] [--min-cells N]\n"
-    "                [--mito-prefix PREFIX] [--n-hvg N] [--n-clusters N]\n"
-    "                [--seed N]\n"
+    "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
+    "                [--n-clusters N] [--seed N]\n"
     "      cell-flow --version"
 )
 
@@ -63,6 +64,7 @@ def _build_analyze_config(options: dict) -> Config:
         min_cells=_parse_int("--min-cells", options["min_cells"]),
         mito_prefix=options["mito_prefix"],
         n_hvg=_parse_int("--n-hvg", options["n_hvg"]),
+        n_pcs=_parse_int("--n-pcs", options["n_pcs"]),
         n_clusters=_parse_int("--n-clusters", options["n_clusters"]),
         seed=_parse_int("--seed", options["seed"]),
     )
@@ -78,6 +80,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--min-cells": "min_cells",
         "--mito-prefix": "mito_prefix",
         "--n-hvg": "n_hvg",
+        "--n-pcs": "n_pcs",
         "--n-clusters": "n_clusters",
         "--seed": "seed",
     }
@@ -87,6 +90,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "min_cells": "3",
         "mito_prefix": "MT-",
         "n_hvg": "2000",
+        "n_pcs": str(MAX_PCS),
         "n_clusters": "2",
         "seed": str(DEFAULT_SEED),
     }

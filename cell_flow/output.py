@@ -222,6 +222,38 @@ def _pca_scatter_tsv(pca: PCAResult, clustering: KMeansResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _pca_variance_tsv(pca: PCAResult) -> str:
+    # 比例以本次实际输出的全部主成分解释方差之和为分母
+    total = sum(pca.explained_variance)
+    lines = [
+        tsv_row(
+            [
+                "component",
+                "explained_variance",
+                "explained_variance_ratio",
+                "cumulative_explained_variance_ratio",
+            ]
+        )
+    ]
+    cumulative = 0.0
+    for k in range(pca.n_pcs):
+        variance = pca.explained_variance[k]
+        ratio = variance / total if total > 0.0 else 0.0
+        # 分母为 0 时累计比例同样保持 0
+        cumulative = cumulative + ratio if total > 0.0 else 0.0
+        lines.append(
+            tsv_row(
+                [
+                    f"PC{k + 1}",
+                    fmt_float(variance),
+                    fmt_float(ratio),
+                    fmt_float(cumulative),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _top_markers_tsv(markers: Dict[int, List[MarkerRecord]]) -> str:
     lines = [
         tsv_row(
@@ -321,6 +353,7 @@ def write_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         ("markers.tsv", _markers_tsv(artifacts.markers)),
         ("qc.tsv", _qc_chart_tsv(artifacts.qc)),
         ("pca_scatter.tsv", _pca_scatter_tsv(artifacts.pca, artifacts.clustering)),
+        ("pca_variance.tsv", _pca_variance_tsv(artifacts.pca)),
         ("top_markers.tsv", _top_markers_tsv(artifacts.markers)),
         (
             "top_marker_expression.tsv",
