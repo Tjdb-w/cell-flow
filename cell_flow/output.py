@@ -102,6 +102,41 @@ def _pca_tsv(pca: PCAResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _pca_variance_tsv(pca: PCAResult) -> str:
+    lines = [
+        tsv_row(
+            [
+                "component",
+                "explained_variance",
+                "explained_variance_ratio",
+                "cumulative_explained_variance_ratio",
+            ]
+        )
+    ]
+    # 分母为本次实际输出的全部主成分解释方差之和；为 0 时比例与累计比例均写 0
+    total = sum(pca.explained_variance)
+    cumulative = 0.0
+    for k, variance in enumerate(pca.explained_variance):
+        cumulative += variance
+        if total > 0.0:
+            ratio = variance / total
+            cumulative_ratio = cumulative / total
+        else:
+            ratio = 0.0
+            cumulative_ratio = 0.0
+        lines.append(
+            tsv_row(
+                [
+                    f"PC{k + 1}",
+                    fmt_float(variance),
+                    fmt_float(ratio),
+                    fmt_float(cumulative_ratio),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _clusters_tsv(pca: PCAResult, clustering: KMeansResult) -> str:
     lines = [tsv_row(["cell_id", "cluster"])]
     for c, cell_id in enumerate(pca.cell_ids):
@@ -317,6 +352,7 @@ def write_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         ("cells.tsv", _cells_tsv(artifacts.qc)),
         ("genes.tsv", _genes_tsv(artifacts.qc)),
         ("pca.tsv", _pca_tsv(artifacts.pca)),
+        ("pca_variance.tsv", _pca_variance_tsv(artifacts.pca)),
         ("clusters.tsv", _clusters_tsv(artifacts.pca, artifacts.clustering)),
         ("markers.tsv", _markers_tsv(artifacts.markers)),
         ("qc.tsv", _qc_chart_tsv(artifacts.qc)),

@@ -23,11 +23,11 @@ class PCAResult:
     cell_ids: List[str]
 
 
-def run_pca(data: NormalizedData) -> PCAResult:
+def run_pca(data: NormalizedData, n_pcs_requested: int = MAX_PCS) -> PCAResult:
     selected = data.selected_genes
     n_cells = len(data.cell_ids)
     n_hvg = len(selected)
-    n_pcs = min(MAX_PCS, n_cells - 1, n_hvg)
+    n_pcs = min(n_pcs_requested, n_cells - 1, n_hvg)
     if n_pcs < 1:
         # 交由管线统一包装为 CellFlowDataError
         raise ValueError("PCA 无法成立：主成分数为 0")
