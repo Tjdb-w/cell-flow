@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cell-flow"
+version = "1.0.0"
+description = "Deterministic single-cell analysis pipeline"
+requires-python = ">=3.9"
+
+[project.scripts]
+cell-flow = "cellflow.cli:main"
+
+[tool.setuptools]
+packages = ["cellflow"]

@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""cell-flow command line entry point (runs from a source checkout)."""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from cellflow.cli import main
+
+if __name__ == "__main__":
+    sys.exit(main())
