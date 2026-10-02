@@ -49,7 +49,7 @@ def find_markers(
         records: List[MarkerRecord] = []
         pvalues: List[float] = []
         for g, gene_id in enumerate(data.gene_ids):
-            row = data.values[g]
+            row = data.analysis_values[g]
             group_in = [row[c] for c in in_cells]
             group_out = [row[c] for c in out_cells]
             mean_in = sum(group_in) / len(group_in)
@@ -125,7 +125,7 @@ def find_pairwise_markers(
             records: List[PairwiseMarkerRecord] = []
             pvalues: List[float] = []
             for g, gene_id in enumerate(data.gene_ids):
-                row = data.values[g]
+                row = data.analysis_values[g]
                 group_a = [row[c] for c in cells_a]
                 group_b = [row[c] for c in cells_b]
                 mean_a = sum(group_a) / len(group_a)
@@ -204,7 +204,7 @@ def _group_comparison(
     records: List[GroupMarkerRecord] = []
     pvalues: List[float] = []
     for g, gene_id in enumerate(data.gene_ids):
-        row = data.values[g]
+        row = data.analysis_values[g]
         values_a = [row[c] for c in cells_a]
         values_b = [row[c] for c in cells_b]
         mean_a = sum(values_a) / len(values_a)

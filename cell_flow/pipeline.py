@@ -8,10 +8,11 @@ from .errors import CellFlowConfigError, CellFlowDataError
 from .io import ExpressionMatrix, read_matrix
 from .kmeans import kmeans
 from .markers import find_group_markers, find_markers, find_pairwise_markers
+from .batch import read_batch_metadata
 from .metadata import read_metadata
 from .mtx import read_mtx_directory
 from .normalize import normalize_and_select_hvg
-from .output import Artifacts, publish_results
+from .output import Artifacts, BatchSummaryRow, publish_results
 from .pca import MAX_PCS, run_pca
 from .qc import compute_qc
 from .selection import select_cluster_count
@@ -37,13 +38,14 @@ class Config:
     seed: int = DEFAULT_SEED
     input_format: str = FORMAT_TSV
     metadata_path: Optional[str] = None
+    batch_metadata_path: Optional[str] = None
 
     @property
     def auto_clusters(self) -> bool:
         return self.n_clusters == AUTO
 
     def public_parameters(self) -> Dict[str, Any]:
-        return {
+        params = {
             "min_genes": self.min_genes,
             "max_mito_fraction": self.max_mito_fraction,
             "min_cells": self.min_cells,
@@ -53,6 +55,10 @@ class Config:
             "n_clusters": self.n_clusters,
             "seed": self.seed,
         }
+        if self.batch_metadata_path is not None:
+            # 仅在提供批次元数据时标明校正方式；无批次参数字段与基线一致
+            params["batch_correction"] = "batch_mean_centering"
+        return params
 
 
 def validate_config(config: Config) -> None:
@@ -104,6 +110,12 @@ def run(config: Config) -> List[str]:
     if config.metadata_path is not None:
         metadata = read_metadata(config.metadata_path, matrix.cell_ids)
 
+    batch_metadata = None
+    if config.batch_metadata_path is not None:
+        batch_metadata = read_batch_metadata(
+            config.batch_metadata_path, matrix.cell_ids
+        )
+
     qc = compute_qc(
         matrix,
         min_genes=config.min_genes,
@@ -122,6 +134,26 @@ def run(config: Config) -> List[str]:
             f"没有基因在至少 {config.min_cells} 个细胞中检出，无可用基因"
         )
 
+    # 保留细胞（原列序）的批次标签；批次均值校正与批次汇总都基于它
+    cell_batches: Optional[List[str]] = None
+    batch_sizes_before: Dict[str, int] = {}
+    batch_sizes_after: Dict[str, int] = {}
+    if batch_metadata is not None:
+        for cell_id in matrix.cell_ids:
+            batch = batch_metadata.assignments[cell_id]
+            batch_sizes_before[batch] = batch_sizes_before.get(batch, 0) + 1
+        cell_batches = []
+        for c in qc.kept_cells:
+            batch = batch_metadata.assignments[matrix.cell_ids[c]]
+            cell_batches.append(batch)
+            batch_sizes_after[batch] = batch_sizes_after.get(batch, 0) + 1
+        n_batches_after = len(batch_sizes_after)
+        if n_batches_after < 2:
+            raise CellFlowDataError(
+                f"质控后保留细胞仅来自 {n_batches_after} 个批次，"
+                f"不足两个，无法进行批次校正"
+            )
+
     if metadata is not None:
         kept_groups = {
             metadata.groups[matrix.cell_ids[c]] for c in qc.kept_cells
@@ -134,7 +166,9 @@ def run(config: Config) -> List[str]:
 
     if config.auto_clusters:
         # 自动模式：候选 k=2..min(10, 质控后细胞数)，PCA 后逐个评估
-        normalized = normalize_and_select_hvg(matrix, qc, n_hvg=config.n_hvg)
+        normalized = normalize_and_select_hvg(
+            matrix, qc, n_hvg=config.n_hvg, cell_batches=cell_batches
+        )
         if not normalized.selected_genes:
             raise CellFlowDataError("高变基因选择结果为空，PCA 无法成立")
 
@@ -157,7 +191,9 @@ def run(config: Config) -> List[str]:
                 f"簇数 {config.n_clusters} 大于质控后细胞数 {n_kept_cells}，聚类无法成立"
             )
 
-        normalized = normalize_and_select_hvg(matrix, qc, n_hvg=config.n_hvg)
+        normalized = normalize_and_select_hvg(
+            matrix, qc, n_hvg=config.n_hvg, cell_batches=cell_batches
+        )
         if not normalized.selected_genes:
             raise CellFlowDataError("高变基因选择结果为空，PCA 无法成立")
 
@@ -186,7 +222,7 @@ def run(config: Config) -> List[str]:
     # 成对比较覆盖实际出现标签的全部 a < b 组合
     pairwise_markers = find_pairwise_markers(normalized, clustering.labels)
 
-    # 分组差异表达：只用质控后保留细胞与基因的 log 归一化表达
+    # 分组差异表达：只用质控后保留细胞与基因的分析表达（提供批次时为校正值）
     group_markers = None
     if metadata is not None:
         cell_groups = [metadata.groups[cell_id] for cell_id in normalized.cell_ids]
@@ -216,6 +252,47 @@ def run(config: Config) -> List[str]:
             "sha256": metadata.sha256,
             "group_sizes": metadata.group_sizes,
         }
+    if batch_metadata is not None:
+        # 记录批次元数据来源与质控前/后各批次细胞数；既有 input 字段保持不变
+        input_info["batch_metadata"] = {
+            "name": batch_metadata.name,
+            "sha256": batch_metadata.sha256,
+            "batch_sizes_before_qc": {
+                batch: batch_sizes_before[batch]
+                for batch in sorted(batch_sizes_before)
+            },
+            "batch_sizes_after_qc": {
+                batch: batch_sizes_after[batch]
+                for batch in sorted(batch_sizes_after)
+            },
+        }
+
+    # 批次汇总：按 batch 升序，后三项为批次内保留细胞均值
+    batch_summary: Optional[List[BatchSummaryRow]] = None
+    if cell_batches is not None:
+        sums: Dict[str, List[float]] = {}
+        counts: Dict[str, int] = {}
+        for ci, c in enumerate(qc.kept_cells):
+            batch = cell_batches[ci]
+            cell_qc = qc.cell_qc[c]
+            accum = sums.setdefault(batch, [0.0, 0.0, 0.0])
+            accum[0] += cell_qc.total_counts
+            accum[1] += cell_qc.detected_genes
+            accum[2] += cell_qc.mitochondrial_fraction
+            counts[batch] = counts.get(batch, 0) + 1
+        batch_summary = []
+        for batch in sorted(sums):
+            n = counts[batch]
+            accum = sums[batch]
+            batch_summary.append(
+                BatchSummaryRow(
+                    batch_id=batch,
+                    n_cells=n,
+                    total_counts=accum[0] / n,
+                    detected_genes=accum[1] / n,
+                    mitochondrial_fraction=accum[2] / n,
+                )
+            )
 
     run_info: Dict[str, Any] = {
         "version": __version__,
@@ -253,6 +330,7 @@ def run(config: Config) -> List[str]:
         run_info=run_info,
         cluster_selection=selection,
         group_markers=group_markers,
+        batch_summary=batch_summary,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

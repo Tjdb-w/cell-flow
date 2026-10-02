@@ -45,6 +45,17 @@ def tsv_row(values: Sequence[Any]) -> str:
 
 
 @dataclass(frozen=True)
+class BatchSummaryRow:
+    """批次汇总中的一行：批次内保留细胞数与其三项指标的批次均值。"""
+
+    batch_id: str
+    n_cells: int
+    total_counts: float              # 批次内保留细胞平均总计数
+    detected_genes: float            # 批次内保留细胞平均检出基因数
+    mitochondrial_fraction: float    # 批次内保留细胞平均线粒体比例
+
+
+@dataclass(frozen=True)
 class Artifacts:
     qc: QCResult
     data: NormalizedData
@@ -55,6 +66,7 @@ class Artifacts:
     run_info: Dict[str, Any]
     cluster_selection: Optional[ClusterSelectionResult] = None
     group_markers: Optional[List[GroupComparison]] = None
+    batch_summary: Optional[List[BatchSummaryRow]] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -311,6 +323,7 @@ def _top_marker_expression_tsv(
     ]
     labels = clustering.labels
     gene_position = {gene_id: g for g, gene_id in enumerate(data.gene_ids)}
+    expression = data.analysis_values
     # PCA 细胞顺序 = 保留细胞顺序
     for cluster in sorted(markers):
         top = markers[cluster][:TOP_N_MARKERS]
@@ -324,7 +337,7 @@ def _top_marker_expression_tsv(
                             r.gene_id,
                             cell_id,
                             fmt_bool(labels[c] == cluster),
-                            fmt_float(data.values[g][c]),
+                            fmt_float(expression[g][c]),
                         ]
                     )
                 )
@@ -491,11 +504,56 @@ def _normalized_expression_tsv(data: NormalizedData) -> str:
     数值即管线中间矩阵 ``NormalizedData.values``：原始计数除以该细胞在
     全部输入基因上的总计数后乘 10000，再取 ln(x + 1)；总计数为零的保留
     细胞在归一化阶段已得到 0.0，这里按最短往返表示原样写出。
+    即使提供批次元数据，本文件仍写未校正原值；校正值见
+    ``batch_corrected_expression.tsv``。
     """
     lines = [tsv_row(["gene_id"] + list(data.cell_ids))]
     for g, gene_id in enumerate(data.gene_ids):
         row = [gene_id] + [fmt_float(value) for value in data.values[g]]
         lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
+def _batch_corrected_expression_tsv(data: NormalizedData) -> str:
+    """与 ``normalized_expression.tsv`` 同形的批次均值中心化表达。
+
+    每个值为对应 log 归一化值减去所属批次的该基因保留细胞均值、再加回
+    全部保留细胞的该基因总均值；行序（保留基因原行序）与列序（保留细胞
+    原列序）均不改变。
+    """
+    corrected = data.batch_corrected_values
+    lines = [tsv_row(["gene_id"] + list(data.cell_ids))]
+    for g, gene_id in enumerate(data.gene_ids):
+        row = [gene_id] + [fmt_float(value) for value in corrected[g]]
+        lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
+def _batch_summary_tsv(rows: List[BatchSummaryRow]) -> str:
+    """按 batch_id 升序的批次汇总；后三列为批次内保留细胞均值。"""
+    lines = [
+        tsv_row(
+            [
+                "batch_id",
+                "n_cells",
+                "total_counts",
+                "detected_genes",
+                "mitochondrial_fraction",
+            ]
+        )
+    ]
+    for row in rows:
+        lines.append(
+            tsv_row(
+                [
+                    row.batch_id,
+                    row.n_cells,
+                    fmt_float(row.total_counts),
+                    fmt_float(row.detected_genes),
+                    fmt_float(row.mitochondrial_fraction),
+                ]
+            )
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -591,6 +649,11 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         "pairwise_marker_chart.tsv",
         "normalized_expression.tsv",
     ]
+    if artifacts.batch_summary is not None:
+        # 仅 --batch-metadata 运行产出批次校正值与批次汇总；
+        # 无批次元数据运行文件集与基线一致
+        final_names.append("batch_corrected_expression.tsv")
+        final_names.append("batch_summary.tsv")
     if artifacts.cluster_selection is not None:
         # 仅 --n-clusters auto 产出候选评估表；显式整数模式文件集与基线一致
         final_names.append("cluster_selection.tsv")
@@ -633,6 +696,16 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             _normalized_expression_tsv(artifacts.data),
         ),
     ]
+    if artifacts.batch_summary is not None:
+        payload.append(
+            (
+                "batch_corrected_expression.tsv",
+                _batch_corrected_expression_tsv(artifacts.data),
+            )
+        )
+        payload.append(
+            ("batch_summary.tsv", _batch_summary_tsv(artifacts.batch_summary))
+        )
     if artifacts.cluster_selection is not None:
         payload.append(
             (
