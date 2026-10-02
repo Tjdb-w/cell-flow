@@ -104,6 +104,16 @@ def _genes_tsv(qc: QCResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _normalized_expression_tsv(data: NormalizedData) -> str:
+    # 质控后保留基因（原矩阵行序）x 保留细胞（原矩阵列序）的 log 归一化表达；
+    # 口径与 normalize 一致：count/total*1e4 后 log1p，零文库细胞已为 0.0
+    lines = [tsv_row(["gene_id"] + list(data.cell_ids))]
+    for g, gene_id in enumerate(data.gene_ids):
+        row = [gene_id] + [fmt_float(v) for v in data.values[g]]
+        lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
 def _pca_tsv(pca: PCAResult) -> str:
     header = ["cell_id"] + [f"PC{k + 1}" for k in range(pca.n_pcs)]
     lines = [tsv_row(header)]
@@ -565,6 +575,7 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
     final_names = [
         "cells.tsv",
         "genes.tsv",
+        "normalized_expression.tsv",
         "pca.tsv",
         "clusters.tsv",
         "markers.tsv",
@@ -588,6 +599,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
     payload: List[Tuple[str, str]] = [
         ("cells.tsv", _cells_tsv(artifacts.qc)),
         ("genes.tsv", _genes_tsv(artifacts.qc)),
+        (
+            "normalized_expression.tsv",
+            _normalized_expression_tsv(artifacts.data),
+        ),
         ("pca.tsv", _pca_tsv(artifacts.pca)),
         ("clusters.tsv", _clusters_tsv(artifacts.pca, artifacts.clustering)),
         ("markers.tsv", _markers_tsv(artifacts.markers)),
