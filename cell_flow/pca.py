@@ -33,10 +33,10 @@ def run_pca(data: NormalizedData, n_pcs: int = MAX_PCS) -> PCAResult:
         # 交由管线统一包装为 CellFlowDataError
         raise ValueError("PCA 无法成立：主成分数为 0")
 
-    # 中心化的细胞 x 高变基因矩阵
+    # 中心化的细胞 x 高变基因矩阵（批次校正时基于校正值）
     centered: List[List[float]] = [[0.0] * n_hvg for _ in range(n_cells)]
     for j, g in enumerate(selected):
-        row = data.values[g]
+        row = data.analysis_values[g]
         mu = sum(row) / n_cells
         for c in range(n_cells):
             centered[c][j] = row[c] - mu

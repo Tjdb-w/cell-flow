@@ -2,8 +2,9 @@
 
 import math
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
+from .batch import center_by_batch
 from .io import ExpressionMatrix
 from .qc import QCResult
 
@@ -20,6 +21,17 @@ class NormalizedData:
     values: List[List[float]]    # values[gene][cell] = ln(count/total*1e4 + 1)
     cell_totals: List[int]       # 与 cell_ids 对齐的原始文库总计数
     selected_genes: List[int]    # 高变基因在 values 中的行下标（原行序）
+    # 批次均值中心化后的表达（与 values 同形）；未做批次校正时为 None
+    corrected_values: Optional[List[List[float]]] = None
+
+    @property
+    def analysis_values(self) -> List[List[float]]:
+        """下游分析（HVG/PCA/聚类/差异表达/图表）使用的表达矩阵。"""
+        return (
+            self.corrected_values
+            if self.corrected_values is not None
+            else self.values
+        )
 
 
 def normalize_and_select_hvg(
@@ -27,7 +39,13 @@ def normalize_and_select_hvg(
     qc: QCResult,
     *,
     n_hvg: int,
+    batch_labels: Optional[List[str]] = None,
 ) -> NormalizedData:
+    """归一化并选择高变基因。
+
+    ``batch_labels`` 与保留细胞（列序）对齐；提供时先对 log 归一化值做
+    批次均值中心化，高变基因在校正值上选择，校正值随结果一并返回。
+    """
     gene_idx = qc.kept_genes
     cell_idx = qc.kept_cells
     cell_ids = [matrix.cell_ids[c] for c in cell_idx]
@@ -46,13 +64,19 @@ def normalize_and_select_hvg(
             normalized_row.append(math.log1p(scaled))
         values.append(normalized_row)
 
-    selected = _select_highly_variable(gene_ids, values, n_hvg)
+    corrected = None
+    if batch_labels is not None:
+        corrected = center_by_batch(values, batch_labels)
+    selected = _select_highly_variable(
+        gene_ids, corrected if corrected is not None else values, n_hvg
+    )
     return NormalizedData(
         gene_ids=gene_ids,
         cell_ids=cell_ids,
         values=values,
         cell_totals=totals,
         selected_genes=selected,
+        corrected_values=corrected,
     )
 
 

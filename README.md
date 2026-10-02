@@ -83,6 +83,37 @@ UTF-8 制表符文本，表头恰为 `cell_id` 和 `group` 两列；`cell_id`
 非空报 `OutputPathError`（退出码 5），同输入同版本的新增结果逐字节
 一致。
 
+### `--batch-metadata`（可选，批次均值中心化校正）
+
+`--batch-metadata <路径>`（`--key value` 与 `--key=value` 均可）指向
+一个 UTF-8 制表符文本，表头恰为 `cell_id` 和 `batch` 两列；
+`cell_id` 唯一且与表达矩阵的全部细胞一一对应（不多不少），`batch`
+非空。文件可为纯文本或单成员 gzip（按内容识别，与文件名无关）。
+内容不合法或 gzip 非单成员流报输入错误（退出码 2），且不改动任何
+已有结果；参数缺值、未知参数或调用不合法报配置错误（退出码 3）。
+质控后保留细胞覆盖的批次少于两个报数据错误（退出码 4）。不提供
+该参数时，全部行为与结果文件与基线逐字节一致。
+
+校正按基因进行：质控与 log 归一化沿用既有规则，随后每个归一化值
+减去对应批次保留细胞的基因均值，再加回全部保留细胞的基因总均值
+（batch mean centering）。校正值进入高变基因选择、PCA、聚类、
+markers、成对 markers、`--metadata` 分组差异表达及图表数据；
+`normalized_expression.tsv` 仍写未校正值。提供批次元数据时在既有
+结果之外新增两个文件（行列顺序与既有表达矩阵一致）：
+
+- `batch_corrected_expression.tsv`：校正后的表达矩阵，行（保留基因）
+  列（保留细胞）顺序与 `normalized_expression.tsv` 相同。
+- `batch_summary.tsv`：按 `batch_id` 升序，每行给出 `batch_id`、
+  `n_cells`（批次内保留细胞数）、`total_counts`、`detected_genes`、
+  `mitochondrial_fraction`，后三项为批次内保留细胞的均值。
+
+`run.json` 的 `input.batch_metadata` 记录批次元数据文件名、原始字节
+SHA-256 与质控前后各批次细胞数；`parameters` 增加
+`"batch_mean_centering": true`；既有字段不变。`--batch-metadata`
+可与 `--metadata` 并用；TSV、MTX、gzip 各输入承载方式下等价矩阵的
+结果一致性保持不变。目标非空或暂存、写出、发布失败报
+`OutputPathError`（退出码 5），同输入同版本的新增结果逐字节一致。
+
 ## 约定
 
 - 公开行为以 README 与源码为准。

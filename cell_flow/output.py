@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .errors import OutputPathError
+from .batch import BatchSummaryRow
 from .kmeans import KMeansResult
 from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
@@ -55,6 +56,7 @@ class Artifacts:
     run_info: Dict[str, Any]
     cluster_selection: Optional[ClusterSelectionResult] = None
     group_markers: Optional[List[GroupComparison]] = None
+    batch_summary: Optional[List[BatchSummaryRow]] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -324,7 +326,7 @@ def _top_marker_expression_tsv(
                             r.gene_id,
                             cell_id,
                             fmt_bool(labels[c] == cluster),
-                            fmt_float(data.values[g][c]),
+                            fmt_float(data.analysis_values[g][c]),
                         ]
                     )
                 )
@@ -499,6 +501,46 @@ def _normalized_expression_tsv(data: NormalizedData) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _batch_corrected_expression_tsv(data: NormalizedData) -> str:
+    """批次均值中心化后的表达；行列顺序与 normalized_expression.tsv 一致。"""
+    corrected = data.corrected_values
+    if corrected is None:
+        raise ValueError("无批次校正值可写出")
+    lines = [tsv_row(["gene_id"] + list(data.cell_ids))]
+    for g, gene_id in enumerate(data.gene_ids):
+        row = [gene_id] + [fmt_float(value) for value in corrected[g]]
+        lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
+def _batch_summary_tsv(rows: List[BatchSummaryRow]) -> str:
+    """按 batch 升序的批次汇总；后三列为批次内保留细胞均值。"""
+    lines = [
+        tsv_row(
+            [
+                "batch_id",
+                "n_cells",
+                "total_counts",
+                "detected_genes",
+                "mitochondrial_fraction",
+            ]
+        )
+    ]
+    for r in rows:
+        lines.append(
+            tsv_row(
+                [
+                    r.batch_id,
+                    r.n_cells,
+                    fmt_float(r.mean_total_counts),
+                    fmt_float(r.mean_detected_genes),
+                    fmt_float(r.mean_mitochondrial_fraction),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
@@ -598,6 +640,11 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         # 仅 --metadata 运行产出分组差异表达；无元数据运行文件集与基线一致
         final_names.append("group_markers.tsv")
         final_names.append("group_marker_chart.tsv")
+    if artifacts.data.corrected_values is not None:
+        # 仅 --batch-metadata 运行产出校正表达；无批次运行文件集与基线一致
+        final_names.append("batch_corrected_expression.tsv")
+    if artifacts.batch_summary is not None:
+        final_names.append("batch_summary.tsv")
     final_names.append("run.json")
 
     payload: List[Tuple[str, str]] = [
@@ -649,6 +696,17 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                 "group_marker_chart.tsv",
                 _group_marker_chart_tsv(artifacts.group_markers),
             )
+        )
+    if artifacts.data.corrected_values is not None:
+        payload.append(
+            (
+                "batch_corrected_expression.tsv",
+                _batch_corrected_expression_tsv(artifacts.data),
+            )
+        )
+    if artifacts.batch_summary is not None:
+        payload.append(
+            ("batch_summary.tsv", _batch_summary_tsv(artifacts.batch_summary))
         )
     payload.append(("run.json", _run_json(artifacts.run_info)))
 
