@@ -485,6 +485,20 @@ def _group_marker_chart_tsv(comparisons: List[GroupComparison]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _normalized_expression_tsv(data: NormalizedData) -> str:
+    """质控后保留基因（原行序）× 保留细胞（原列序）的 log 归一化表达。
+
+    数值即管线中间矩阵 ``NormalizedData.values``：原始计数除以该细胞在
+    全部输入基因上的总计数后乘 10000，再取 ln(x + 1)；总计数为零的保留
+    细胞在归一化阶段已得到 0.0，这里按最短往返表示原样写出。
+    """
+    lines = [tsv_row(["gene_id"] + list(data.cell_ids))]
+    for g, gene_id in enumerate(data.gene_ids):
+        row = [gene_id] + [fmt_float(value) for value in data.values[g]]
+        lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
 def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
@@ -575,6 +589,7 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         "top_marker_expression.tsv",
         "pairwise_markers.tsv",
         "pairwise_marker_chart.tsv",
+        "normalized_expression.tsv",
     ]
     if artifacts.cluster_selection is not None:
         # 仅 --n-clusters auto 产出候选评估表；显式整数模式文件集与基线一致
@@ -612,6 +627,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         (
             "pairwise_marker_chart.tsv",
             _pairwise_marker_chart_tsv(artifacts.pairwise_markers),
+        ),
+        (
+            "normalized_expression.tsv",
+            _normalized_expression_tsv(artifacts.data),
         ),
     ]
     if artifacts.cluster_selection is not None:
