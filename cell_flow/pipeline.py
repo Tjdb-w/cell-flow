@@ -5,7 +5,12 @@ from typing import Any, Dict, List, Union
 
 from . import __version__
 from .errors import CellFlowConfigError, CellFlowDataError
-from .io import ExpressionMatrix, read_matrix
+from .io import (
+    INPUT_FORMATS,
+    MTX_FORMAT,
+    TSV_FORMAT,
+    load_matrix,
+)
 from .kmeans import kmeans
 from .markers import find_markers, find_pairwise_markers
 from .normalize import normalize_and_select_hvg
@@ -30,6 +35,7 @@ class Config:
     n_pcs: int = MAX_PCS
     n_clusters: Union[int, str] = 2
     seed: int = DEFAULT_SEED
+    input_format: str = TSV_FORMAT
 
     @property
     def auto_clusters(self) -> bool:
@@ -51,6 +57,11 @@ class Config:
 def validate_config(config: Config) -> None:
     """校验参数取值；冲突或非法一律抛 CellFlowConfigError。"""
     errors: List[str] = []
+    if config.input_format not in INPUT_FORMATS:
+        errors.append(
+            "--input-format 只能是 "
+            f"{TSV_FORMAT!r} 或 {MTX_FORMAT!r}，得到 {config.input_format!r}"
+        )
     if not isinstance(config.min_genes, int) or config.min_genes < 0:
         errors.append("--min-genes 必须是非负整数")
     if not isinstance(config.min_cells, int) or config.min_cells < 1:
@@ -85,7 +96,7 @@ def run(config: Config) -> List[str]:
 
     # 先完成读入与全部计算，最后再触碰输出目录：
     # 任何分析阶段失败都不应留下空目录或半成品结果
-    matrix = read_matrix(config.input_path)
+    matrix = load_matrix(config.input_path, config.input_format)
 
     qc = compute_qc(
         matrix,
@@ -163,15 +174,25 @@ def run(config: Config) -> List[str]:
     for label in clustering.labels:
         cluster_sizes[label] = cluster_sizes.get(label, 0) + 1
 
+    input_info: Dict[str, Any] = {
+        "path": matrix.path,
+        "sha256": matrix.sha256,
+        "n_genes": matrix.n_genes,
+        "n_cells": matrix.n_cells,
+        "total_counts": matrix.total_counts,
+    }
+    if matrix.input_format == MTX_FORMAT:
+        # mtx 运行仅追加来源记录：格式标记 + 三个输入文件名与各自 SHA-256；
+        # tsv 运行的 input 块字段保持与基线完全一致
+        input_info["input_format"] = MTX_FORMAT
+        input_info["files"] = [
+            {"name": source.name, "sha256": source.sha256}
+            for source in matrix.source_files
+        ]
+
     run_info: Dict[str, Any] = {
         "version": __version__,
-        "input": {
-            "path": matrix.path,
-            "sha256": matrix.sha256,
-            "n_genes": matrix.n_genes,
-            "n_cells": matrix.n_cells,
-            "total_counts": matrix.total_counts,
-        },
+        "input": input_info,
         "parameters": config.public_parameters(),
         "stage_counts": {
             "input_cells": matrix.n_cells,

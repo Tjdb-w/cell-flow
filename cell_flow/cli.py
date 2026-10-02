@@ -2,9 +2,13 @@
 
 用法::
 
-    cell-flow analyze --input <表达矩阵.tsv> --output-dir <结果目录> \\
+    cell-flow analyze --input <输入路径> --output-dir <结果目录> \\
+        [--input-format tsv|mtx] \\
         [--min-genes 200] [--max-mito-fraction 0.2] [--min-cells 3] \\
         [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617]
+
+``--input-format`` 默认 ``tsv``（制表符计数矩阵）；取 ``mtx`` 时
+``--input`` 指向含 matrix.mtx、barcodes.tsv、features.tsv 的 10x 目录。
 """
 
 import sys
@@ -12,11 +16,13 @@ from typing import Optional, Sequence
 
 from . import __version__
 from .errors import CellFlowError
+from .io import INPUT_FORMATS, MTX_FORMAT, TSV_FORMAT
 from .pca import MAX_PCS
 from .pipeline import DEFAULT_SEED, Config, run
 
 USAGE = (
-    "用法：cell-flow analyze --input <表达矩阵.tsv> --output-dir <结果目录>\n"
+    "用法：cell-flow analyze --input <输入路径> --output-dir <结果目录>\n"
+    "                [--input-format tsv|mtx]\n"
     "                [--min-genes N] [--max-mito-fraction F] [--min-cells N]\n"
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
     "                [--n-clusters N|auto] [--seed N]\n"
@@ -61,6 +67,12 @@ def _build_analyze_config(options: dict) -> Config:
         raise _fail_usage("缺少必需参数 --input")
     if options.get("output_dir") is None:
         raise _fail_usage("缺少必需参数 --output-dir")
+    input_format = options["input_format"]
+    if input_format not in INPUT_FORMATS:
+        raise _fail_usage(
+            "--input-format 只能是 "
+            f"{TSV_FORMAT!r} 或 {MTX_FORMAT!r}，得到 {input_format!r}"
+        )
     return Config(
         input_path=options["input"],
         output_dir=options["output_dir"],
@@ -74,6 +86,7 @@ def _build_analyze_config(options: dict) -> Config:
         n_pcs=_parse_int("--n-pcs", options["n_pcs"]),
         n_clusters=_parse_n_clusters(options["n_clusters"]),
         seed=_parse_int("--seed", options["seed"]),
+        input_format=input_format,
     )
 
 
@@ -82,6 +95,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
     value_options = {
         "--input": "input",
         "--output-dir": "output_dir",
+        "--input-format": "input_format",
         "--min-genes": "min_genes",
         "--max-mito-fraction": "max_mito_fraction",
         "--min-cells": "min_cells",
@@ -92,6 +106,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--seed": "seed",
     }
     options = {
+        "input_format": TSV_FORMAT,
         "min_genes": "200",
         "max_mito_fraction": "0.2",
         "min_cells": "3",
