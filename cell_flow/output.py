@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .errors import OutputPathError
 from .kmeans import KMeansResult
-from .markers import MarkerRecord, PairwiseMarkerRecord
+from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
 from .pca import PCAResult
 from .qc import QCResult
@@ -54,6 +54,7 @@ class Artifacts:
     pairwise_markers: List[Tuple[int, int, List[PairwiseMarkerRecord]]]
     run_info: Dict[str, Any]
     cluster_selection: Optional[ClusterSelectionResult] = None
+    group_markers: Optional[List[GroupComparison]] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -410,6 +411,80 @@ def _pairwise_marker_chart_tsv(
     return "\n".join(lines) + "\n"
 
 
+def _group_markers_tsv(comparisons: List[GroupComparison]) -> str:
+    lines = [
+        tsv_row(
+            [
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "gene_id",
+                "mean_in_a",
+                "mean_in_b",
+                "log_fc_a_vs_b",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for _, _, _, records in comparisons:
+        for r in records:
+            lines.append(
+                tsv_row(
+                    [
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        r.gene_id,
+                        fmt_float(r.mean_in_a),
+                        fmt_float(r.mean_in_b),
+                        fmt_float(r.log_fc_a_vs_b),
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _group_marker_chart_tsv(comparisons: List[GroupComparison]) -> str:
+    lines = [
+        tsv_row(
+            [
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "rank",
+                "gene_id",
+                "log_fc_a_vs_b",
+                "p_value",
+                "p_value_adj",
+                "neg_log10_p_adj",
+            ]
+        )
+    ]
+    for _, _, _, records in comparisons:
+        for rank, r in enumerate(records[:TOP_N_MARKERS], start=1):
+            lines.append(
+                tsv_row(
+                    [
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        rank,
+                        r.gene_id,
+                        fmt_float(r.log_fc_a_vs_b),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                        _neg_log10_p_adj(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
 def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
@@ -504,6 +579,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
     if artifacts.cluster_selection is not None:
         # 仅 --n-clusters auto 产出候选评估表；显式整数模式文件集与基线一致
         final_names.append("cluster_selection.tsv")
+    if artifacts.group_markers is not None:
+        # 仅 --metadata 运行产出分组差异表达；无元数据运行文件集与基线一致
+        final_names.append("group_markers.tsv")
+        final_names.append("group_marker_chart.tsv")
     final_names.append("run.json")
 
     payload: List[Tuple[str, str]] = [
@@ -540,6 +619,16 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             (
                 "cluster_selection.tsv",
                 _cluster_selection_tsv(artifacts.cluster_selection),
+            )
+        )
+    if artifacts.group_markers is not None:
+        payload.append(
+            ("group_markers.tsv", _group_markers_tsv(artifacts.group_markers))
+        )
+        payload.append(
+            (
+                "group_marker_chart.tsv",
+                _group_marker_chart_tsv(artifacts.group_markers),
             )
         )
     payload.append(("run.json", _run_json(artifacts.run_info)))

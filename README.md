@@ -56,6 +56,33 @@ gzip 头、CRC、长度校验失败或流被截断一律报输入错误（退出
 来源字段外，矩阵等价的两种 TSV 或两种 MTX 来源，每个结果文件
 逐字节一致。
 
+### `--metadata`（可选，细胞分组差异表达）
+
+`--metadata <路径>`（`--key value` 与 `--key=value` 均可）指向一个
+UTF-8 制表符文本，表头恰为 `cell_id` 和 `group` 两列；`cell_id`
+唯一且与表达矩阵的全部细胞一一对应（不多不少），`group` 非空。
+文件可为纯文本或单成员 gzip（按内容识别，与文件名无关）。内容不合法
+或 gzip 非单成员流报输入错误（退出码 2），且不改动任何已有结果；
+参数缺值、未知参数或调用不合法报配置错误（退出码 3）。质控后非空
+分组少于两个报数据错误（退出码 4）。
+
+提供元数据时在既有结果之外新增两个文件（其余结果与无元数据运行
+逐字节一致）：
+
+- `group_markers.tsv`：只用质控后保留细胞与基因的 log 归一化表达。
+  每个分组先做 one-vs-rest，再按 group 升序对每对分组做两两检验。
+  前三列为 `comparison_type`、`group_a`、`group_b`（one-vs-rest 的
+  `group_b` 为空），其余列沿用成对 marker 的口径：`gene_id`、
+  `mean_in_a`、`mean_in_b`、`log_fc_a_vs_b`（均值差）、`t_stat`、
+  `p_value`（Welch t 检验）、`p_value_adj`（每个比较内 BH 校正）。
+  每个比较内按校正 P 值升序、`log_fc_a_vs_b` 降序、`gene_id` 升序排序。
+- `group_marker_chart.tsv`：每个比较取前 20 个基因，含 `rank` 列。
+
+`run.json` 的 `input.metadata` 记录元数据文件名、原始字节 SHA-256
+与各分组细胞数；既有 `input` 字段不变。计算完成后事务性发布；目标
+非空报 `OutputPathError`（退出码 5），同输入同版本的新增结果逐字节
+一致。
+
 ## 约定
 
 - 公开行为以 README 与源码为准。
