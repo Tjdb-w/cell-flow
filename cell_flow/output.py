@@ -1,14 +1,21 @@
-"""结果文件写出：全部内容先在内存构建，再以临时文件 + 原子替换落盘。
+"""结果文件的事务性发布：全部内容先在内存构建，再暂存、最后原子发布。
 
 约束：
-- 不覆盖任何已有文件；目标目录已存在且非空时由上游抛出 ``OutputPathError``；
-- ``run.json`` 最后写出，其存在即标志结果完整；
+- 不覆盖任何已有文件；目标已存在且非空、目标不是目录、父目录不存在时抛 ``OutputPathError``；
+- 所有结果先写入目标父目录下的隐藏暂存目录（与目标同一文件系统），逐文件
+  临时文件 + 改名 + fsync，随后一次性发布：目标不存在则整目录 rename（原子），
+  目标为空目录则逐条目 rename（run.json 最后），失败即撤回；
+- ``run.json`` 最后发布，其存在即标志结果完整；任何中途失败都不会让它单独可见；
+- 任一文件系统故障都把目标路径恢复到调用前状态（不存在/仍为空/不动非空目录），
+  不残留临时文件，统一以 ``OutputPathError`` 上报，绝不把底层 OSError 透出；
 - 数值用 ``repr`` 最短往返表示，文本与行序在同输入同版本下逐字节一致。
 """
 
+import contextlib
 import json
 import math
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -440,28 +447,36 @@ def _cluster_selection_tsv(selection: ClusterSelectionResult) -> str:
     return "\n".join(lines) + "\n"
 
 
-def ensure_output_dir(output_dir: str) -> None:
-    """目录不存在则创建；存在且非空则抛错；存在且为空则复用。"""
+def _validate_target(output_dir: str) -> str:
+    """校验目标路径并返回其绝对路径；不创建任何东西。
+
+    目标已存在但不是目录、已存在且非空、或父目录不存在时抛 ``OutputPathError``。
+    目标不存在或存在且为空都允许（空目录稍后原地发布、复用）。
+    """
     if output_dir is None or output_dir == "":
         raise OutputPathError("结果目录路径为空")
-    if os.path.exists(output_dir):
-        if not os.path.isdir(output_dir):
+    abs_output = os.path.abspath(output_dir)
+    if os.path.lexists(abs_output):
+        if not os.path.isdir(abs_output):
             raise OutputPathError(f"输出路径已存在且不是目录：{output_dir}")
-        contents = os.listdir(output_dir)
+        try:
+            contents = os.listdir(abs_output)
+        except OSError as exc:
+            raise OutputPathError(f"结果目录无法访问：{output_dir}（{exc}）")
         if contents:
             raise OutputPathError(
                 f"结果目录已存在且非空：{output_dir}（含 {len(contents)} 个条目）"
             )
     else:
-        parent = os.path.dirname(os.path.abspath(output_dir))
+        parent = os.path.dirname(abs_output)
         if not os.path.isdir(parent):
             raise OutputPathError(f"输出目录的父目录不存在：{parent}")
-        os.makedirs(output_dir)
+    return abs_output
 
 
-def write_results(output_dir: str, artifacts: Artifacts) -> List[str]:
-    """原子写出全部结果，返回写出的文件名（run.json 在最后）。"""
-    payload: List[tuple[str, str]] = [
+def _build_payload(artifacts: "Artifacts") -> List[Tuple[str, str]]:
+    """按既有顺序构建全部结果文本（纯内存计算，不触碰文件系统）。"""
+    payload: List[Tuple[str, str]] = [
         ("cells.tsv", _cells_tsv(artifacts.qc)),
         ("genes.tsv", _genes_tsv(artifacts.qc)),
         ("pca.tsv", _pca_tsv(artifacts.pca)),
@@ -498,36 +513,138 @@ def write_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                 _cluster_selection_tsv(artifacts.cluster_selection),
             )
         )
+    # run.json 永远最后：它的存在即标志整组结果完整
     payload.append(("run.json", _run_json(artifacts.run_info)))
+    return payload
 
-    temp_paths: List[str] = []
-    final_names: List[str] = []
+
+def _stage_file(staging_dir: str, name: str, content: str) -> None:
+    """把单个结果以临时文件 + 改名 + fsync 的方式落到暂存目录。"""
+    final_path = os.path.join(staging_dir, name)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{name}.", suffix=".tmp", dir=staging_dir
+    )
+    try:
+        os.chmod(tmp_path, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, final_path)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_path)
+        raise OutputPathError(f"结果文件写出失败：{name}（{exc}）")
+
+
+def _fsync_dir(path: str) -> None:
+    """刷目录项，使其中的改名在崩溃后仍持久；不支持时静默跳过。"""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _remove_temp_tree(path: str) -> None:
+    """尽力删除暂存目录，忽略清理自身的故障（原始失败优先上报）。"""
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _publish_new(abs_output: str, staging_dir: str) -> None:
+    """目标原本不存在：整目录原子改名到目标，失败则删除暂存、目标不出现。"""
+    try:
+        os.rename(staging_dir, abs_output)
+    except OSError as exc:
+        _remove_temp_tree(staging_dir)
+        raise OutputPathError(f"结果目录发布失败：{abs_output}（{exc}）")
+    _fsync_dir(os.path.dirname(abs_output))
+
+
+def _publish_into_empty(
+    abs_output: str, staging_dir: str, names: List[str]
+) -> None:
+    """目标原本为空目录：按序逐条目改名进入，任一失败立即撤回已发布条目。
+
+    run.json 在 names 末尾，故总是最后可见；撤回时它也最先被移除。
+    """
+    moved: List[str] = []
+    current = ""
+    try:
+        for name in names:
+            current = name
+            os.rename(os.path.join(staging_dir, name), os.path.join(abs_output, name))
+            moved.append(name)
+        _fsync_dir(abs_output)
+    except OSError as exc:
+        # 逆序撤回：run.json（若已发布）最先消失，最终目标恢复为空
+        for moved_name in reversed(moved):
+            with contextlib.suppress(OSError):
+                os.replace(
+                    os.path.join(abs_output, moved_name),
+                    os.path.join(staging_dir, moved_name),
+                )
+        _fsync_dir(abs_output)
+        _remove_temp_tree(staging_dir)
+        raise OutputPathError(f"结果文件发布失败：{current}（{exc}）")
+    # 全部条目已就位，删除现已清空的暂存目录；
+    # 此刻 run.json 已随最后一次改名持久落盘，提交已经完成，
+    # 清理仅剩的空暂存目录不应让一次完整成功的运行转为失败
+    try:
+        os.rmdir(staging_dir)
+    except OSError:
+        _remove_temp_tree(staging_dir)
+
+
+def publish_results(output_dir: str, artifacts: "Artifacts") -> List[str]:
+    """事务性发布全部结果，返回按写出顺序排列的文件名（run.json 在最后）。
+
+    先校验目标、再在目标父目录下的同文件系统暂存目录中写好全部文件，
+    最后一次性发布。任一步骤失败都把目标恢复到调用前状态并抛
+    ``OutputPathError``，绝不透出底层 OSError。
+    """
+    abs_output = _validate_target(output_dir)
+    parent = os.path.dirname(abs_output)
+    payload = _build_payload(artifacts)
+    names = [name for name, _ in payload]
+
+    # 暂存目录与目标同父目录 => 同一文件系统，后续 rename 为同卷原子改名
+    try:
+        staging_dir = tempfile.mkdtemp(prefix=".cell-flow-staging-", dir=parent)
+    except OSError as exc:
+        raise OutputPathError(f"暂存目录创建失败：{parent}（{exc}）")
+    try:
+        os.chmod(staging_dir, 0o755)
+    except OSError as exc:
+        _remove_temp_tree(staging_dir)
+        raise OutputPathError(f"暂存目录创建失败：{parent}（{exc}）")
+
     try:
         for name, content in payload:
-            final_path = os.path.join(output_dir, name)
-            if os.path.exists(final_path):
-                # 绝不覆盖已有文件
-                raise OutputPathError(f"结果文件已存在，拒绝覆盖：{final_path}")
-            fd, tmp_path = tempfile.mkstemp(
-                prefix=f".{name}.", suffix=".tmp", dir=output_dir
-            )
-            temp_paths.append(tmp_path)
-            os.chmod(tmp_path, 0o644)
+            _stage_file(staging_dir, name, content)
+        _fsync_dir(staging_dir)
+
+        if os.path.isdir(abs_output):
+            # 空目录：校验阶段已确认其为空，发布前再确认一次以避免竞态写入
             try:
-                with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                    handle.write(content)
-                    handle.flush()
-                    os.fsync(handle.fileno())
+                if os.listdir(abs_output):
+                    raise OutputPathError(f"结果目录已存在且非空：{output_dir}")
             except OSError as exc:
-                raise OutputPathError(f"结果文件写出失败：{name}（{exc}）")
-        for (name, _), tmp_path in list(zip(payload, temp_paths)):
-            os.replace(tmp_path, os.path.join(output_dir, name))
-            final_names.append(name)
-        temp_paths = []
-    finally:
-        for tmp_path in temp_paths:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-    return final_names
+                raise OutputPathError(f"结果目录无法访问：{output_dir}（{exc}）")
+            _publish_into_empty(abs_output, staging_dir, names)
+        else:
+            _publish_new(abs_output, staging_dir)
+    except OutputPathError:
+        # 发布/撤回例程已自行回收暂存目录；更早阶段的失败在此统一回收
+        _remove_temp_tree(staging_dir)
+        raise
+    except OSError as exc:
+        _remove_temp_tree(staging_dir)
+        raise OutputPathError(f"结果写出失败：{output_dir}（{exc}）")
+
+    return names

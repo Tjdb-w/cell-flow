@@ -10,7 +10,7 @@ from .kmeans import kmeans
 from .markers import find_markers, find_pairwise_markers
 from .mtx import read_mtx_directory
 from .normalize import normalize_and_select_hvg
-from .output import Artifacts, ensure_output_dir, write_results
+from .output import Artifacts, publish_results
 from .pca import MAX_PCS, run_pca
 from .qc import compute_qc
 from .selection import select_cluster_count
@@ -223,6 +223,6 @@ def run(config: Config) -> List[str]:
         run_info=run_info,
         cluster_selection=selection,
     )
-    # 全部计算已完成，此处才创建/校验输出目录并原子写出
-    ensure_output_dir(config.output_dir)
-    return write_results(config.output_dir, artifacts)
+    # 全部计算已完成，才进入事务性发布：内部先校验/暂存再原子提交，
+    # 任一文件系统故障都会把目标路径恢复到调用前状态并抛 OutputPathError
+    return publish_results(config.output_dir, artifacts)
