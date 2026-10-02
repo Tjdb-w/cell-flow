@@ -1,14 +1,20 @@
-"""结果文件写出：全部内容先在内存构建，再以临时文件 + 原子替换落盘。
+"""结果文件写出：全部内容先在内存构建，再经同级隐藏暂存目录事务性发布。
 
 约束：
-- 不覆盖任何已有文件；目标目录已存在且非空时由上游抛出 ``OutputPathError``；
-- ``run.json`` 最后写出，其存在即标志结果完整；
+- 预检先于任何创建：目标路径不是目录、结果目录已存在且非空、父目录不存在，
+  一律抛 ``OutputPathError`` 且不创建或改动任何目录；
+- 所有结果先写入父目录下的一个隐藏暂存目录，再以一次 ``os.replace`` 原子改名
+  发布；``run.json`` 与其余文件同时出现，其存在即标志结果完整，不可能单独可见；
+- 暂存或发布任一步失败都整体删除暂存目录并抛 ``OutputPathError``，目标路径
+  恢复调用前状态（原不存在则不残留、原空目录仍为空、原非空目录原样保留）；
+- 不覆盖任何已有文件；
 - 数值用 ``repr`` 最短往返表示，文本与行序在同输入同版本下逐字节一致。
 """
 
 import json
 import math
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -440,12 +446,20 @@ def _cluster_selection_tsv(selection: ClusterSelectionResult) -> str:
     return "\n".join(lines) + "\n"
 
 
-def ensure_output_dir(output_dir: str) -> None:
-    """目录不存在则创建；存在且非空则抛错；存在且为空则复用。"""
+def _validate_target(output_dir: str) -> None:
+    """预检目标路径，不创建、不改动任何目录。
+
+    - 路径为空：拒绝；
+    - 已存在且不是目录：拒绝；
+    - 已存在且是目录：必须为空，复用该空目录（非空则拒绝）；
+    - 不存在：其父目录必须已存在（沿用“父目录不存在”的既有判定）。
+    """
     if output_dir is None or output_dir == "":
         raise OutputPathError("结果目录路径为空")
-    if os.path.exists(output_dir):
-        if not os.path.isdir(output_dir):
+    if os.path.lexists(output_dir):
+        if not os.path.isdir(output_dir) or os.path.islink(output_dir):
+            # isdir 会跟随符号链接：指向目录的链接仍属“不是（普通）目录”，
+            # 不能把结果发布到链接背后，故同样拒绝
             raise OutputPathError(f"输出路径已存在且不是目录：{output_dir}")
         contents = os.listdir(output_dir)
         if contents:
@@ -456,12 +470,43 @@ def ensure_output_dir(output_dir: str) -> None:
         parent = os.path.dirname(os.path.abspath(output_dir))
         if not os.path.isdir(parent):
             raise OutputPathError(f"输出目录的父目录不存在：{parent}")
-        os.makedirs(output_dir)
 
 
-def write_results(output_dir: str, artifacts: Artifacts) -> List[str]:
-    """原子写出全部结果，返回写出的文件名（run.json 在最后）。"""
-    payload: List[tuple[str, str]] = [
+def _remove_stage(stage_dir: str) -> None:
+    """删除暂存目录；删除本身失败不再向上传播（调用方即将报原始写出故障）。"""
+    shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
+    """事务性发布全部结果，返回文件名列表（run.json 在最后）。
+
+    全部文件先落到父目录下的一个同级隐藏暂存目录，随后一次 ``os.replace``
+    原子改名为目标目录。任何创建、写入、刷盘、改名或最终发布失败都清理暂存
+    目录并抛 :class:`OutputPathError`，目标路径回到调用前状态。
+    """
+    _validate_target(output_dir)
+
+    parent = os.path.dirname(os.path.abspath(output_dir))
+    final_names = [
+        "cells.tsv",
+        "genes.tsv",
+        "pca.tsv",
+        "clusters.tsv",
+        "markers.tsv",
+        "qc.tsv",
+        "pca_scatter.tsv",
+        "pca_variance.tsv",
+        "top_markers.tsv",
+        "top_marker_expression.tsv",
+        "pairwise_markers.tsv",
+        "pairwise_marker_chart.tsv",
+    ]
+    if artifacts.cluster_selection is not None:
+        # 仅 --n-clusters auto 产出候选评估表；显式整数模式文件集与基线一致
+        final_names.append("cluster_selection.tsv")
+    final_names.append("run.json")
+
+    payload: List[Tuple[str, str]] = [
         ("cells.tsv", _cells_tsv(artifacts.qc)),
         ("genes.tsv", _genes_tsv(artifacts.qc)),
         ("pca.tsv", _pca_tsv(artifacts.pca)),
@@ -490,7 +535,6 @@ def write_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             _pairwise_marker_chart_tsv(artifacts.pairwise_markers),
         ),
     ]
-    # 仅 --n-clusters auto 产出候选评估表；显式整数模式文件集与基线一致
     if artifacts.cluster_selection is not None:
         payload.append(
             (
@@ -500,34 +544,47 @@ def write_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         )
     payload.append(("run.json", _run_json(artifacts.run_info)))
 
-    temp_paths: List[str] = []
-    final_names: List[str] = []
+    stage_dir: Optional[str] = None
     try:
-        for name, content in payload:
-            final_path = os.path.join(output_dir, name)
-            if os.path.exists(final_path):
-                # 绝不覆盖已有文件
-                raise OutputPathError(f"结果文件已存在，拒绝覆盖：{final_path}")
-            fd, tmp_path = tempfile.mkstemp(
-                prefix=f".{name}.", suffix=".tmp", dir=output_dir
+        try:
+            stage_dir = tempfile.mkdtemp(
+                prefix="..cell-flow-staging.", dir=parent
             )
-            temp_paths.append(tmp_path)
-            os.chmod(tmp_path, 0o644)
+            # mkdtemp 默认 0700；发布后的结果目录沿用 makedirs 的默认权限（受 umask 约束）
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(stage_dir, 0o777 & ~umask)
+        except OSError as exc:
+            raise OutputPathError(f"结果暂存目录创建失败：{exc}") from exc
+
+        for name, content in payload:
+            stage_path = os.path.join(stage_dir, name)
+            fd = None
             try:
+                fd = os.open(stage_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
                 with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                    fd = None
                     handle.write(content)
                     handle.flush()
                     os.fsync(handle.fileno())
             except OSError as exc:
-                raise OutputPathError(f"结果文件写出失败：{name}（{exc}）")
-        for (name, _), tmp_path in list(zip(payload, temp_paths)):
-            os.replace(tmp_path, os.path.join(output_dir, name))
-            final_names.append(name)
-        temp_paths = []
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                raise OutputPathError(
+                    f"结果文件写出失败：{name}（{exc}）"
+                ) from exc
+
+        try:
+            os.replace(stage_dir, os.path.abspath(output_dir))
+        except OSError as exc:
+            raise OutputPathError(f"结果目录发布失败：{output_dir}（{exc}）") from exc
+        stage_dir = None  # 已发布：暂存目录即目标目录，不得再清理
     finally:
-        for tmp_path in temp_paths:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+        if stage_dir is not None:
+            # 发布前失败：仅删除我们自己的暂存目录，绝不触碰目标目录。
+            _remove_stage(stage_dir)
+
     return final_names
