@@ -2,7 +2,8 @@
 
 用法::
 
-    cell-flow analyze --input <表达矩阵.tsv> --output-dir <结果目录> \\
+    cell-flow analyze --input <表达矩阵.tsv|mtx目录> --output-dir <结果目录> \\
+        [--input-format tsv|mtx] \\
         [--min-genes 200] [--max-mito-fraction 0.2] [--min-cells 3] \\
         [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617]
 """
@@ -13,10 +14,11 @@ from typing import Optional, Sequence
 from . import __version__
 from .errors import CellFlowError
 from .pca import MAX_PCS
-from .pipeline import DEFAULT_SEED, Config, run
+from .pipeline import DEFAULT_SEED, Config, INPUT_FORMATS, run
 
 USAGE = (
-    "用法：cell-flow analyze --input <表达矩阵.tsv> --output-dir <结果目录>\n"
+    "用法：cell-flow analyze --input <表达矩阵.tsv|mtx目录> --output-dir <结果目录>\n"
+    "                [--input-format tsv|mtx]\n"
     "                [--min-genes N] [--max-mito-fraction F] [--min-cells N]\n"
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
     "                [--n-clusters N|auto] [--seed N]\n"
@@ -74,7 +76,16 @@ def _build_analyze_config(options: dict) -> Config:
         n_pcs=_parse_int("--n-pcs", options["n_pcs"]),
         n_clusters=_parse_n_clusters(options["n_clusters"]),
         seed=_parse_int("--seed", options["seed"]),
+        input_format=_parse_input_format(options["input_format"]),
     )
+
+
+def _parse_input_format(raw: str) -> str:
+    if raw not in INPUT_FORMATS:
+        raise _fail_usage(
+            f"--input-format 只能是 tsv 或 mtx，得到 {raw!r}"
+        )
+    return raw
 
 
 def _parse_analyze(argv: Sequence[str]) -> Config:
@@ -82,6 +93,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
     value_options = {
         "--input": "input",
         "--output-dir": "output_dir",
+        "--input-format": "input_format",
         "--min-genes": "min_genes",
         "--max-mito-fraction": "max_mito_fraction",
         "--min-cells": "min_cells",
@@ -92,6 +104,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--seed": "seed",
     }
     options = {
+        "input_format": "tsv",
         "min_genes": "200",
         "max_mito_fraction": "0.2",
         "min_cells": "3",

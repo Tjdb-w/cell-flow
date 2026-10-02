@@ -8,7 +8,7 @@
 import hashlib
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 from .errors import CellFlowInputError
@@ -17,8 +17,20 @@ _INTEGER_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 
 
 @dataclass(frozen=True)
+class InputFile:
+    """一个输入文件的来源记录：文件名与原始字节的 SHA-256。"""
+
+    name: str
+    sha256: str
+
+
+@dataclass(frozen=True)
 class ExpressionMatrix:
-    """原始计数矩阵（行＝基因，列＝细胞）。"""
+    """原始计数矩阵（行＝基因，列＝细胞）。
+
+    ``input_format`` 为 ``"tsv"`` 时沿用 ``path``/``sha256`` 单一文件记录；
+    为 ``"mtx"`` 时 ``files`` 依次记录 matrix.mtx、barcodes.tsv、features.tsv。
+    """
 
     gene_ids: List[str]
     cell_ids: List[str]
@@ -26,6 +38,8 @@ class ExpressionMatrix:
     sha256: str
     path: str
     total_counts: int
+    input_format: str = "tsv"
+    files: List[InputFile] = field(default_factory=list)
 
     @property
     def n_genes(self) -> int:

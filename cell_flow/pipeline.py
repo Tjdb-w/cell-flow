@@ -8,6 +8,7 @@ from .errors import CellFlowConfigError, CellFlowDataError
 from .io import ExpressionMatrix, read_matrix
 from .kmeans import kmeans
 from .markers import find_markers, find_pairwise_markers
+from .mtx import read_mtx_directory
 from .normalize import normalize_and_select_hvg
 from .output import Artifacts, ensure_output_dir, write_results
 from .pca import MAX_PCS, run_pca
@@ -16,6 +17,9 @@ from .selection import select_cluster_count
 
 DEFAULT_SEED = 20240617
 AUTO = "auto"
+FORMAT_TSV = "tsv"
+FORMAT_MTX = "mtx"
+INPUT_FORMATS = (FORMAT_TSV, FORMAT_MTX)
 
 
 @dataclass(frozen=True)
@@ -30,6 +34,7 @@ class Config:
     n_pcs: int = MAX_PCS
     n_clusters: Union[int, str] = 2
     seed: int = DEFAULT_SEED
+    input_format: str = FORMAT_TSV
 
     @property
     def auto_clusters(self) -> bool:
@@ -76,6 +81,8 @@ def validate_config(config: Config) -> None:
             errors.append("--n-clusters 必须是 >= 2 的整数")
     if not isinstance(config.seed, int) or isinstance(config.seed, bool):
         errors.append("--seed 必须是整数")
+    if config.input_format not in INPUT_FORMATS:
+        errors.append("--input-format 只能是 tsv 或 mtx")
     if errors:
         raise CellFlowConfigError("；".join(errors))
 
@@ -85,7 +92,10 @@ def run(config: Config) -> List[str]:
 
     # 先完成读入与全部计算，最后再触碰输出目录：
     # 任何分析阶段失败都不应留下空目录或半成品结果
-    matrix = read_matrix(config.input_path)
+    if config.input_format == FORMAT_MTX:
+        matrix = read_mtx_directory(config.input_path)
+    else:
+        matrix = read_matrix(config.input_path)
 
     qc = compute_qc(
         matrix,
@@ -163,15 +173,23 @@ def run(config: Config) -> List[str]:
     for label in clustering.labels:
         cluster_sizes[label] = cluster_sizes.get(label, 0) + 1
 
+    input_info: Dict[str, Any] = {
+        "path": matrix.path,
+        "sha256": matrix.sha256,
+        "n_genes": matrix.n_genes,
+        "n_cells": matrix.n_cells,
+        "total_counts": matrix.total_counts,
+    }
+    if matrix.input_format == FORMAT_MTX:
+        # mtx 运行仅额外记录格式与三个输入文件的来源；tsv 运行字段保持不变
+        input_info["input_format"] = FORMAT_MTX
+        input_info["files"] = [
+            {"name": f.name, "sha256": f.sha256} for f in matrix.files
+        ]
+
     run_info: Dict[str, Any] = {
         "version": __version__,
-        "input": {
-            "path": matrix.path,
-            "sha256": matrix.sha256,
-            "n_genes": matrix.n_genes,
-            "n_cells": matrix.n_cells,
-            "total_counts": matrix.total_counts,
-        },
+        "input": input_info,
         "parameters": config.public_parameters(),
         "stage_counts": {
             "input_cells": matrix.n_cells,
