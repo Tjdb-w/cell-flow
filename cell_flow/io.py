@@ -1,13 +1,16 @@
 """输入矩阵读取与严格校验。
 
 输入为制表符分隔矩阵：首列是唯一基因 ID，其余列名是唯一细胞 ID，
-取值为非负整数 UMI 计数。任何不合法情形都抛出
+取值为非负整数 UMI 计数。文件可以是 UTF-8 文本，也可以是同一文本的
+单成员 gzip 压缩（按 gzip 魔数识别）；压缩只改变承载方式，解压后的
+文本口径与未压缩输入完全一致。任何不合法情形都抛出
 :class:`cell_flow.errors.CellFlowInputError`。
 """
 
 import hashlib
 import os
 import re
+import zlib
 from dataclasses import dataclass, field
 from typing import List
 
@@ -29,7 +32,8 @@ class ExpressionMatrix:
     """原始计数矩阵（行＝基因，列＝细胞）。
 
     ``input_format`` 为 ``"tsv"`` 时沿用 ``path``/``sha256`` 单一文件记录；
-    为 ``"mtx"`` 时 ``files`` 依次记录 matrix.mtx、barcodes.tsv、features.tsv。
+    为 ``"mtx"`` 时 ``files`` 依次记录 matrix、barcodes、features 三个
+    成员的实际文件名（未压缩原名或 ``.gz`` 名）。
     """
 
     gene_ids: List[str]
@@ -52,6 +56,41 @@ class ExpressionMatrix:
 
 def _fail(message: str) -> None:
     raise CellFlowInputError(message)
+
+
+_GZIP_MAGIC = b"\x1f\x8b"
+
+
+def _decompress_gzip(raw: bytes, path: str) -> bytes:
+    """严格解压单成员 gzip 字节流。
+
+    gzip 头非法、CRC 或长度校验失败、数据截断、多成员或成员后存在
+    尾随数据，都意味着无法无损还原，一律抛
+    :class:`cell_flow.errors.CellFlowInputError`。
+    """
+    # wbits=16+MAX_WBITS 让 zlib 按 gzip 封装解析并自动校验 CRC32 与 ISIZE
+    decomp = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        payload = decomp.decompress(raw)
+        payload += decomp.flush()
+    except zlib.error as exc:
+        _fail(f"gzip 数据无法无损还原：{path}（{exc}）")
+    if not decomp.eof:
+        _fail(f"gzip 数据被截断，无法无损还原：{path}")
+    if decomp.unused_data:
+        _fail(f"gzip 存在多成员或尾随数据，无法无损还原：{path}")
+    return payload
+
+
+def _maybe_decompress_gzip(raw: bytes, path: str) -> bytes:
+    """按 gzip 魔数识别压缩输入；非 gzip 字节原样返回。
+
+    合法 UTF-8 文本不可能以 0x1F 0x8B 开头（0x8B 是孤立延续字节），
+    因此魔数判定不会与未压缩文本混淆。
+    """
+    if raw.startswith(_GZIP_MAGIC):
+        return _decompress_gzip(raw, path)
+    return raw
 
 
 def _parse_count(raw: str, gene_id: str, cell_id: str, row_no: int) -> int:
@@ -79,9 +118,11 @@ def read_matrix(path: str) -> ExpressionMatrix:
     except OSError as exc:
         _fail(f"输入文件不可读：{path}（{exc}）")
 
+    # SHA-256 按实际文件原始字节计算；gzip 输入先解压再按文本口径解析
     digest = hashlib.sha256(raw_bytes).hexdigest()
+    payload = _maybe_decompress_gzip(raw_bytes, path)
     try:
-        text = raw_bytes.decode("utf-8")
+        text = payload.decode("utf-8")
     except UnicodeDecodeError:
         _fail(f"输入文件不是合法的 UTF-8 文本：{path}")
 

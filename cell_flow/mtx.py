@@ -1,15 +1,19 @@
 """标准 10x MatrixMarket 稀疏输入读取与严格校验。
 
-输入目录须含三个文件：
-- ``matrix.mtx``：MatrixMarket 坐标格式，仅接受
+输入目录须含三个文件，三者必须同为未压缩或同为 gzip 单成员压缩：
+- ``matrix.mtx``（或 ``matrix.mtx.gz``）：MatrixMarket 坐标格式，仅接受
   ``coordinate integer general`` 或 ``coordinate real general``；
   行是基因、列是细胞、索引从 1 开始；零值可省略，显式值必须能
   无损解析为有限非负整数；
-- ``barcodes.tsv``：每个非空行是一个细胞 ID，按文件行序进入分析；
-- ``features.tsv``：每个非空数据行取第一列作为基因 ID，按文件行序进入分析。
+- ``barcodes.tsv``（或 ``barcodes.tsv.gz``）：每个非空行是一个细胞 ID，
+  按文件行序进入分析；
+- ``features.tsv``（或 ``features.tsv.gz``）：每个非空数据行取第一列
+  作为基因 ID，按文件行序进入分析。
 
-声明维度必须与 ID 数量匹配；缺文件、格式头不支持、越界索引、重复坐标、
-空或重复 ID、非法数值一律抛 :class:`cell_flow.errors.CellFlowInputError`。
+压缩只改变承载方式，解压后文本口径与未压缩输入一致。声明维度必须与
+ID 数量匹配；缺文件、压缩与未压缩混用、gzip 无法无损还原、格式头不支持、
+越界索引、重复坐标、空或重复 ID、非法数值一律抛
+:class:`cell_flow.errors.CellFlowInputError`。
 """
 
 import hashlib
@@ -18,11 +22,13 @@ from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Tuple
 
 from .errors import CellFlowInputError
-from .io import ExpressionMatrix, InputFile
+from .io import ExpressionMatrix, InputFile, _decompress_gzip
 
 MATRIX_NAME = "matrix.mtx"
 BARCODES_NAME = "barcodes.tsv"
 FEATURES_NAME = "features.tsv"
+MEMBER_NAMES = (MATRIX_NAME, BARCODES_NAME, FEATURES_NAME)
+GZIP_SUFFIX = ".gz"
 
 _BANNER = "%%matrixmarket"
 
@@ -31,7 +37,44 @@ def _fail(message: str):
     raise CellFlowInputError(message)
 
 
-def _read_file(directory: str, name: str) -> Tuple[bytes, str]:
+def _resolve_members(directory: str) -> Tuple[List[str], bool]:
+    """确定三个成员的实际文件名与是否 gzip 承载。
+
+    三者必须同为未压缩原名或同为 ``.gz`` 名；混用（含同一角色原名与
+    ``.gz`` 并存）或缺文件一律抛
+    :class:`cell_flow.errors.CellFlowInputError`。
+    """
+    plain_present = [
+        os.path.exists(os.path.join(directory, name)) for name in MEMBER_NAMES
+    ]
+    gz_present = [
+        os.path.exists(os.path.join(directory, name + GZIP_SUFFIX))
+        for name in MEMBER_NAMES
+    ]
+    if all(plain_present) and not any(gz_present):
+        return list(MEMBER_NAMES), False
+    if all(gz_present) and not any(plain_present):
+        return [name + GZIP_SUFFIX for name in MEMBER_NAMES], True
+    if any(plain_present) and any(gz_present):
+        _fail(
+            "MTX 三个输入文件必须同为未压缩或同为 gzip："
+            f"{directory} 中混用了两种形式"
+        )
+    # 无混用但存在缺失：沿用“缺少文件”口径；目录中已出现 .gz 成员时
+    # 按 gzip 形式报告缺失名，否则按原名报告
+    names = MEMBER_NAMES
+    present = plain_present
+    if any(gz_present):
+        names = tuple(name + GZIP_SUFFIX for name in MEMBER_NAMES)
+        present = gz_present
+    for name, ok in zip(names, present):
+        if not ok:
+            _fail(f"MTX 输入缺少文件：{os.path.join(directory, name)}")
+    # 不可达：上面的分支已覆盖全部存在性组合
+    raise AssertionError("成员存在性组合未被覆盖")
+
+
+def _read_file(directory: str, name: str, compressed: bool) -> Tuple[bytes, str]:
     path = os.path.join(directory, name)
     if not os.path.exists(path):
         _fail(f"MTX 输入缺少文件：{path}")
@@ -44,8 +87,9 @@ def _read_file(directory: str, name: str) -> Tuple[bytes, str]:
             raw = handle.read()
     except OSError as exc:
         _fail(f"MTX 输入文件不可读：{path}（{exc}）")
+    payload = _decompress_gzip(raw, path) if compressed else raw
     try:
-        text = raw.decode("utf-8")
+        text = payload.decode("utf-8")
     except UnicodeDecodeError:
         _fail(f"MTX 输入文件不是合法的 UTF-8 文本：{path}")
     return raw, text
@@ -80,7 +124,7 @@ def _read_id_lines(
 
 
 def _parse_nonnegative_integer(
-    token: str, field_type: str, entry_no: int
+    token: str, field_type: str, entry_no: int, matrix_name: str
 ) -> Optional[int]:
     """把一个显式矩阵元素解析为有限非负整数，要求无损。
 
@@ -91,7 +135,7 @@ def _parse_nonnegative_integer(
     if field_type == "integer":
         if not _is_decimal_uint(token):
             _fail(
-                f"{MATRIX_NAME} 第 {entry_no} 个数据元素 {token!r} "
+                f"{matrix_name} 第 {entry_no} 个数据元素 {token!r} "
                 f"不是非负整数"
             )
         value = int(token)
@@ -104,16 +148,16 @@ def _parse_nonnegative_integer(
             number = Decimal("nan")
         if not number.is_finite():
             _fail(
-                f"{MATRIX_NAME} 第 {entry_no} 个数据元素 {token!r} "
+                f"{matrix_name} 第 {entry_no} 个数据元素 {token!r} "
                 f"不是有限数值"
             )
         if number < 0:
             _fail(
-                f"{MATRIX_NAME} 第 {entry_no} 个数据元素 {token!r} 为负数"
+                f"{matrix_name} 第 {entry_no} 个数据元素 {token!r} 为负数"
             )
         if number != number.to_integral_value():
             _fail(
-                f"{MATRIX_NAME} 第 {entry_no} 个数据元素 {token!r} "
+                f"{matrix_name} 第 {entry_no} 个数据元素 {token!r} "
                 f"不是整数值，无法无损解析为计数"
             )
         value = int(number)
@@ -134,7 +178,7 @@ def _is_decimal_uint(token: str) -> bool:
 
 
 def _parse_matrix(
-    text: str, path: str
+    text: str, path: str, matrix_name: str
 ) -> Tuple[int, int, Dict[Tuple[int, int], int]]:
     lines = text.splitlines()
 
@@ -231,7 +275,7 @@ def _parse_matrix(
                 f"{path} 第 {entry_no} 个数据元素列索引 {col_idx} 越界"
                 f"（声明列数 {n_cols}）"
             )
-        value = _parse_nonnegative_integer(val_tok, field_type, entry_no)
+        value = _parse_nonnegative_integer(val_tok, field_type, entry_no, matrix_name)
         key = (row_idx, col_idx)
         if key in seen_coords:
             _fail(
@@ -259,38 +303,41 @@ def read_mtx_directory(directory: str) -> ExpressionMatrix:
     if not os.path.isdir(directory):
         _fail(f"MTX 输入路径不是目录：{directory}")
 
-    matrix_raw, matrix_text = _read_file(directory, MATRIX_NAME)
-    barcodes_raw, barcodes_text = _read_file(directory, BARCODES_NAME)
-    features_raw, features_text = _read_file(directory, FEATURES_NAME)
+    member_names, compressed = _resolve_members(directory)
+    matrix_name, barcodes_name, features_name = member_names
+
+    matrix_raw, matrix_text = _read_file(directory, matrix_name, compressed)
+    barcodes_raw, barcodes_text = _read_file(directory, barcodes_name, compressed)
+    features_raw, features_text = _read_file(directory, features_name, compressed)
 
     cell_ids = _read_id_lines(
         barcodes_text,
-        os.path.join(directory, BARCODES_NAME),
+        os.path.join(directory, barcodes_name),
         first_column_only=False,
         kind="细胞",
     )
     gene_ids = _read_id_lines(
         features_text,
-        os.path.join(directory, FEATURES_NAME),
+        os.path.join(directory, features_name),
         first_column_only=True,
         kind="基因",
     )
     if not cell_ids:
-        _fail(f"{BARCODES_NAME} 没有任何非空细胞 ID 行")
+        _fail(f"{barcodes_name} 没有任何非空细胞 ID 行")
     if not gene_ids:
-        _fail(f"{FEATURES_NAME} 没有任何非空基因 ID 数据行")
+        _fail(f"{features_name} 没有任何非空基因 ID 数据行")
 
     n_rows, n_cols, entries = _parse_matrix(
-        matrix_text, os.path.join(directory, MATRIX_NAME)
+        matrix_text, os.path.join(directory, matrix_name), matrix_name
     )
     if n_rows != len(gene_ids):
         _fail(
-            f"{MATRIX_NAME} 声明行数 {n_rows} 与 {FEATURES_NAME} 基因数 "
+            f"{matrix_name} 声明行数 {n_rows} 与 {features_name} 基因数 "
             f"{len(gene_ids)} 不一致"
         )
     if n_cols != len(cell_ids):
         _fail(
-            f"{MATRIX_NAME} 声明列数 {n_cols} 与 {BARCODES_NAME} 细胞数 "
+            f"{matrix_name} 声明列数 {n_cols} 与 {barcodes_name} 细胞数 "
             f"{len(cell_ids)} 不一致"
         )
 
@@ -302,9 +349,9 @@ def read_mtx_directory(directory: str) -> ExpressionMatrix:
         total += value
 
     files = [
-        InputFile(name=MATRIX_NAME, sha256=hashlib.sha256(matrix_raw).hexdigest()),
-        InputFile(name=BARCODES_NAME, sha256=hashlib.sha256(barcodes_raw).hexdigest()),
-        InputFile(name=FEATURES_NAME, sha256=hashlib.sha256(features_raw).hexdigest()),
+        InputFile(name=matrix_name, sha256=hashlib.sha256(matrix_raw).hexdigest()),
+        InputFile(name=barcodes_name, sha256=hashlib.sha256(barcodes_raw).hexdigest()),
+        InputFile(name=features_name, sha256=hashlib.sha256(features_raw).hexdigest()),
     ]
     return ExpressionMatrix(
         gene_ids=gene_ids,
