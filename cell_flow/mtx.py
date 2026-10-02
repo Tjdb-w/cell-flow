@@ -1,15 +1,20 @@
 """标准 10x MatrixMarket 稀疏输入读取与严格校验。
 
-输入目录须含三个文件：
-- ``matrix.mtx``：MatrixMarket 坐标格式，仅接受
+输入目录须含三个文件，每个文件可保持原名，也可整体改用 gzip 压缩名
+（三个文件必须同为未压缩或同为 gzip，混用报输入错误）：
+- ``matrix.mtx`` / ``matrix.mtx.gz``：MatrixMarket 坐标格式，仅接受
   ``coordinate integer general`` 或 ``coordinate real general``；
   行是基因、列是细胞、索引从 1 开始；零值可省略，显式值必须能
   无损解析为有限非负整数；
-- ``barcodes.tsv``：每个非空行是一个细胞 ID，按文件行序进入分析；
-- ``features.tsv``：每个非空数据行取第一列作为基因 ID，按文件行序进入分析。
+- ``barcodes.tsv`` / ``barcodes.tsv.gz``：每个非空行是一个细胞 ID，
+  按文件行序进入分析；
+- ``features.tsv`` / ``features.tsv.gz``：每个非空数据行取第一列作为
+  基因 ID，按文件行序进入分析。
 
-声明维度必须与 ID 数量匹配；缺文件、格式头不支持、越界索引、重复坐标、
-空或重复 ID、非法数值一律抛 :class:`cell_flow.errors.CellFlowInputError`。
+gzip 载体仅允许单成员且无尾随数据；gzip 头、CRC、长度校验失败或流被
+截断一律报输入错误。声明维度必须与 ID 数量匹配；缺文件、两种文件名
+并存、格式头不支持、越界索引、重复坐标、空或重复 ID、非法数值一律
+抛 :class:`cell_flow.errors.CellFlowInputError`。
 """
 
 import hashlib
@@ -18,11 +23,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Tuple
 
 from .errors import CellFlowInputError
-from .io import ExpressionMatrix, InputFile
+from .io import GZIP_MAGIC, ExpressionMatrix, InputFile, gunzip_single
 
 MATRIX_NAME = "matrix.mtx"
 BARCODES_NAME = "barcodes.tsv"
 FEATURES_NAME = "features.tsv"
+GZIP_SUFFIX = ".gz"
 
 _BANNER = "%%matrixmarket"
 
@@ -31,10 +37,33 @@ def _fail(message: str):
     raise CellFlowInputError(message)
 
 
-def _read_file(directory: str, name: str) -> Tuple[bytes, str]:
+def _resolve_name(directory: str, base_name: str) -> Tuple[str, bool]:
+    """在目录中解析 ``<name>`` 或 ``<name>.gz``，二者必须恰好存在一个。
+
+    返回（实际文件名，是否 gzip）。此步只做布局校验，不读取文件内容，
+    以保证缺文件与“压缩/未压缩混用”的报错先于任何内容损坏报错。
+    """
+    gz_name = base_name + GZIP_SUFFIX
+    plain_path = os.path.join(directory, base_name)
+    gz_path = os.path.join(directory, gz_name)
+    plain_exists = os.path.exists(plain_path)
+    gz_exists = os.path.exists(gz_path)
+    if plain_exists and gz_exists:
+        _fail(
+            f"MTX 输入同时存在 {base_name} 与 {gz_name}，"
+            f"二者只能保留其一：{directory}"
+        )
+    if gz_exists:
+        return gz_name, True
+    if plain_exists:
+        return base_name, False
+    _fail(f"MTX 输入缺少文件：{plain_path}（或 {gz_name}）")
+
+
+def _read_named_file(
+    directory: str, name: str, *, compressed: bool
+) -> Tuple[bytes, str]:
     path = os.path.join(directory, name)
-    if not os.path.exists(path):
-        _fail(f"MTX 输入缺少文件：{path}")
     if not os.path.isfile(path):
         _fail(f"MTX 输入路径不是普通文件：{path}")
     if not os.access(path, os.R_OK):
@@ -44,8 +73,22 @@ def _read_file(directory: str, name: str) -> Tuple[bytes, str]:
             raw = handle.read()
     except OSError as exc:
         _fail(f"MTX 输入文件不可读：{path}（{exc}）")
+
+    if compressed:
+        # .gz 是压缩状态的显式声明：内容必须确实是 gzip，由
+        # gunzip_single 严格校验魔数、CRC、长度、截断与单成员
+        payload = gunzip_single(raw, path)
+    elif raw[:2] == GZIP_MAGIC:
+        # 未压缩名下出现 gzip 字节属于布局不合法，避免静默按内容嗅探
+        _fail(
+            f"MTX 输入文件 {name} 的内容是 gzip，但文件名未带 "
+            f"{GZIP_SUFFIX} 后缀：{path}"
+        )
+    else:
+        payload = raw
+
     try:
-        text = raw.decode("utf-8")
+        text = payload.decode("utf-8")
     except UnicodeDecodeError:
         _fail(f"MTX 输入文件不是合法的 UTF-8 文本：{path}")
     return raw, text
@@ -259,38 +302,55 @@ def read_mtx_directory(directory: str) -> ExpressionMatrix:
     if not os.path.isdir(directory):
         _fail(f"MTX 输入路径不是目录：{directory}")
 
-    matrix_raw, matrix_text = _read_file(directory, MATRIX_NAME)
-    barcodes_raw, barcodes_text = _read_file(directory, BARCODES_NAME)
-    features_raw, features_text = _read_file(directory, FEATURES_NAME)
+    # 先只解析三个文件名并校验“同为压缩或同为未压缩”，
+    # 使布局错误先于任何文件内容错误暴露
+    matrix_actual, matrix_gz = _resolve_name(directory, MATRIX_NAME)
+    barcodes_actual, barcodes_gz = _resolve_name(directory, BARCODES_NAME)
+    features_actual, features_gz = _resolve_name(directory, FEATURES_NAME)
+    if not (matrix_gz == barcodes_gz == features_gz):
+        _fail(
+            f"MTX 三个输入文件必须同为未压缩或同为 gzip，当前混用："
+            f"{matrix_actual}、{barcodes_actual}、{features_actual}"
+        )
+
+    matrix_raw, matrix_text = _read_named_file(
+        directory, matrix_actual, compressed=matrix_gz
+    )
+    barcodes_raw, barcodes_text = _read_named_file(
+        directory, barcodes_actual, compressed=barcodes_gz
+    )
+    features_raw, features_text = _read_named_file(
+        directory, features_actual, compressed=features_gz
+    )
 
     cell_ids = _read_id_lines(
         barcodes_text,
-        os.path.join(directory, BARCODES_NAME),
+        os.path.join(directory, barcodes_actual),
         first_column_only=False,
         kind="细胞",
     )
     gene_ids = _read_id_lines(
         features_text,
-        os.path.join(directory, FEATURES_NAME),
+        os.path.join(directory, features_actual),
         first_column_only=True,
         kind="基因",
     )
     if not cell_ids:
-        _fail(f"{BARCODES_NAME} 没有任何非空细胞 ID 行")
+        _fail(f"{barcodes_actual} 没有任何非空细胞 ID 行")
     if not gene_ids:
-        _fail(f"{FEATURES_NAME} 没有任何非空基因 ID 数据行")
+        _fail(f"{features_actual} 没有任何非空基因 ID 数据行")
 
     n_rows, n_cols, entries = _parse_matrix(
-        matrix_text, os.path.join(directory, MATRIX_NAME)
+        matrix_text, os.path.join(directory, matrix_actual)
     )
     if n_rows != len(gene_ids):
         _fail(
-            f"{MATRIX_NAME} 声明行数 {n_rows} 与 {FEATURES_NAME} 基因数 "
+            f"{matrix_actual} 声明行数 {n_rows} 与 {features_actual} 基因数 "
             f"{len(gene_ids)} 不一致"
         )
     if n_cols != len(cell_ids):
         _fail(
-            f"{MATRIX_NAME} 声明列数 {n_cols} 与 {BARCODES_NAME} 细胞数 "
+            f"{matrix_actual} 声明列数 {n_cols} 与 {barcodes_actual} 细胞数 "
             f"{len(cell_ids)} 不一致"
         )
 
@@ -302,9 +362,9 @@ def read_mtx_directory(directory: str) -> ExpressionMatrix:
         total += value
 
     files = [
-        InputFile(name=MATRIX_NAME, sha256=hashlib.sha256(matrix_raw).hexdigest()),
-        InputFile(name=BARCODES_NAME, sha256=hashlib.sha256(barcodes_raw).hexdigest()),
-        InputFile(name=FEATURES_NAME, sha256=hashlib.sha256(features_raw).hexdigest()),
+        InputFile(name=matrix_actual, sha256=hashlib.sha256(matrix_raw).hexdigest()),
+        InputFile(name=barcodes_actual, sha256=hashlib.sha256(barcodes_raw).hexdigest()),
+        InputFile(name=features_actual, sha256=hashlib.sha256(features_raw).hexdigest()),
     ]
     return ExpressionMatrix(
         gene_ids=gene_ids,
