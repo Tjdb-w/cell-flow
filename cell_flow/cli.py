@@ -18,7 +18,7 @@ from .pipeline import DEFAULT_SEED, Config, INPUT_FORMATS, run
 
 USAGE = (
     "用法：cell-flow analyze --input <表达矩阵.tsv|mtx目录> --output-dir <结果目录>\n"
-    "                [--input-format tsv|mtx]\n"
+    "                [--input-format tsv|mtx] [--metadata <分组.tsv|.tsv.gz>]\n"
     "                [--min-genes N] [--max-mito-fraction F] [--min-cells N]\n"
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
     "                [--n-clusters N|auto] [--seed N]\n"
@@ -77,6 +77,7 @@ def _build_analyze_config(options: dict) -> Config:
         n_clusters=_parse_n_clusters(options["n_clusters"]),
         seed=_parse_int("--seed", options["seed"]),
         input_format=_parse_input_format(options["input_format"]),
+        metadata_path=options.get("metadata"),
     )
 
 
@@ -94,6 +95,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--input": "input",
         "--output-dir": "output_dir",
         "--input-format": "input_format",
+        "--metadata": "metadata",
         "--min-genes": "min_genes",
         "--max-mito-fraction": "max_mito_fraction",
         "--min-cells": "min_cells",

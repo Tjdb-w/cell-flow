@@ -1,13 +1,15 @@
 """分析管线编排：参数校验 -> 读入 -> QC -> 归一化/HVG -> PCA -> 聚类 -> 差异表达 -> 写出。"""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 from . import __version__
 from .errors import CellFlowConfigError, CellFlowDataError
+from .group_markers import find_group_markers
 from .io import ExpressionMatrix, read_matrix
 from .kmeans import kmeans
 from .markers import find_markers, find_pairwise_markers
+from .metadata import CellGroupMetadata, read_metadata
 from .mtx import read_mtx_directory
 from .normalize import normalize_and_select_hvg
 from .output import Artifacts, publish_results
@@ -35,6 +37,7 @@ class Config:
     n_clusters: Union[int, str] = 2
     seed: int = DEFAULT_SEED
     input_format: str = FORMAT_TSV
+    metadata_path: Optional[str] = None
 
     @property
     def auto_clusters(self) -> bool:
@@ -97,6 +100,12 @@ def run(config: Config) -> List[str]:
     else:
         matrix = read_matrix(config.input_path)
 
+    # 元数据若提供，须覆盖矩阵全部细胞；任何内容或 gzip 不合法在此抛
+    # CellFlowInputError，先于任何分析与输出目录创建
+    metadata: Optional[CellGroupMetadata] = None
+    if config.metadata_path is not None:
+        metadata = read_metadata(config.metadata_path, matrix.cell_ids)
+
     qc = compute_qc(
         matrix,
         min_genes=config.min_genes,
@@ -114,6 +123,17 @@ def run(config: Config) -> List[str]:
         raise CellFlowDataError(
             f"没有基因在至少 {config.min_cells} 个细胞中检出，无可用基因"
         )
+
+    if metadata is not None:
+        # 以质控后保留细胞统计非空分组：少于两个无法做组间差异表达
+        kept_group_sizes: Dict[str, int] = {}
+        for c in qc.kept_cells:
+            group = metadata.groups[matrix.cell_ids[c]]
+            kept_group_sizes[group] = kept_group_sizes.get(group, 0) + 1
+        if len(kept_group_sizes) < 2:
+            raise CellFlowDataError(
+                "质控后非空分组少于两个，无法进行细胞分组差异表达"
+            )
 
     if config.auto_clusters:
         # 自动模式：候选 k=2..min(10, 质控后细胞数)，PCA 后逐个评估
@@ -169,6 +189,20 @@ def run(config: Config) -> List[str]:
     # 成对比较覆盖实际出现标签的全部 a < b 组合
     pairwise_markers = find_pairwise_markers(normalized, clustering.labels)
 
+    group_markers = None
+    group_cell_counts: Optional[Dict[str, int]] = None
+    if metadata is not None:
+        # 仅用质控后保留细胞与基因的 log-归一化表达（normalized 已满足）
+        group_markers = find_group_markers(normalized, metadata.groups)
+        # run.json 记录每个分组在质控后细胞中的数量（group 升序）
+        group_cell_counts = {}
+        for c, cell_id in enumerate(normalized.cell_ids):
+            group = metadata.groups[cell_id]
+            group_cell_counts[group] = group_cell_counts.get(group, 0) + 1
+        group_cell_counts = {
+            group: group_cell_counts[group] for group in sorted(group_cell_counts)
+        }
+
     cluster_sizes: Dict[int, int] = {}
     for label in clustering.labels:
         cluster_sizes[label] = cluster_sizes.get(label, 0) + 1
@@ -186,6 +220,13 @@ def run(config: Config) -> List[str]:
         input_info["files"] = [
             {"name": f.name, "sha256": f.sha256} for f in matrix.files
         ]
+    if metadata is not None:
+        # 仅在提供 --metadata 时追加该字段；不提供时 input 结构与基线逐字一致
+        input_info["metadata"] = {
+            "name": metadata.name,
+            "sha256": metadata.sha256,
+            "group_cell_counts": group_cell_counts,
+        }
 
     run_info: Dict[str, Any] = {
         "version": __version__,
@@ -222,6 +263,7 @@ def run(config: Config) -> List[str]:
         pairwise_markers=pairwise_markers,
         run_info=run_info,
         cluster_selection=selection,
+        group_markers=group_markers,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

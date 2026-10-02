@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .errors import OutputPathError
+from .group_markers import GroupMarkerComparison
 from .kmeans import KMeansResult
 from .markers import MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
@@ -54,6 +55,8 @@ class Artifacts:
     pairwise_markers: List[Tuple[int, int, List[PairwiseMarkerRecord]]]
     run_info: Dict[str, Any]
     cluster_selection: Optional[ClusterSelectionResult] = None
+    # 仅在提供 --metadata 时存在；为 None 时不产出分组差异表达文件
+    group_markers: Optional[List[GroupMarkerComparison]] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -410,9 +413,89 @@ def _pairwise_marker_chart_tsv(
     return "\n".join(lines) + "\n"
 
 
+def _group_markers_tsv(
+    comparisons: List[GroupMarkerComparison],
+) -> str:
+    # 前三列固定为 comparison_type、group_a、group_b（one-vs-rest 的
+    # group_b 为空列），其余列沿用 pairwise marker 口径
+    lines = [
+        tsv_row(
+            [
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "gene_id",
+                "mean_in_a",
+                "mean_in_b",
+                "log_fc",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for _, _, _, records in comparisons:
+        for r in records:
+            lines.append(
+                tsv_row(
+                    [
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        r.gene_id,
+                        fmt_float(r.mean_in_a),
+                        fmt_float(r.mean_in_b),
+                        fmt_float(r.log_fc),
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _group_marker_chart_tsv(
+    comparisons: List[GroupMarkerComparison],
+) -> str:
+    # 每个比较取排序后前 TOP_N_MARKERS 个基因，并给出比较内 rank
+    lines = [
+        tsv_row(
+            [
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "rank",
+                "gene_id",
+                "log_fc",
+                "p_value",
+                "p_value_adj",
+                "neg_log10_p_adj",
+            ]
+        )
+    ]
+    for _, _, _, records in comparisons:
+        for rank, r in enumerate(records[:TOP_N_MARKERS], start=1):
+            lines.append(
+                tsv_row(
+                    [
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        rank,
+                        r.gene_id,
+                        fmt_float(r.log_fc),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                        _neg_log10_p_adj(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
 def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
-
 
 def _cluster_selection_tsv(selection: ClusterSelectionResult) -> str:
     # 候选按 k 升序；布尔 true/false；浮点最短往返；无效行两项指标 nan
@@ -501,6 +584,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         "pairwise_markers.tsv",
         "pairwise_marker_chart.tsv",
     ]
+    if artifacts.group_markers is not None:
+        final_names.extend(
+            ["group_markers.tsv", "group_marker_chart.tsv"]
+        )
     if artifacts.cluster_selection is not None:
         # 仅 --n-clusters auto 产出候选评估表；显式整数模式文件集与基线一致
         final_names.append("cluster_selection.tsv")
@@ -535,6 +622,19 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             _pairwise_marker_chart_tsv(artifacts.pairwise_markers),
         ),
     ]
+    if artifacts.group_markers is not None:
+        payload.extend(
+            [
+                (
+                    "group_markers.tsv",
+                    _group_markers_tsv(artifacts.group_markers),
+                ),
+                (
+                    "group_marker_chart.tsv",
+                    _group_marker_chart_tsv(artifacts.group_markers),
+                ),
+            ]
+        )
     if artifacts.cluster_selection is not None:
         payload.append(
             (
