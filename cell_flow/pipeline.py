@@ -1,4 +1,4 @@
-"""分析管线编排：参数校验 -> 读入 -> QC -> 归一化/HVG -> PCA -> 聚类 -> 差异表达 -> 写出。"""
+"""分析管线编排：参数校验 -> 读入 -> QC -> 归一化/HVG -> PCA -> 聚类 -> 差异表达/基因集评分 -> 写出。"""
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Union
 from . import __version__
 from .batch import BatchSummaryRow, read_batch_metadata
 from .errors import CellFlowConfigError, CellFlowDataError
+from .gene_sets import read_gene_sets, score_gene_sets
 from .io import ExpressionMatrix, read_matrix
 from .kmeans import kmeans
 from .markers import find_group_markers, find_markers, find_pairwise_markers
@@ -39,6 +40,7 @@ class Config:
     input_format: str = FORMAT_TSV
     metadata_path: Optional[str] = None
     batch_metadata_path: Optional[str] = None
+    gene_sets_path: Optional[str] = None
 
     @property
     def auto_clusters(self) -> bool:
@@ -58,6 +60,9 @@ class Config:
         if self.batch_metadata_path is not None:
             # 仅批次校正运行记录该参数；无批次运行时 parameters 与基线一致
             parameters["batch_mean_centering"] = True
+        if self.gene_sets_path is not None:
+            # 仅基因集评分运行记录该参数；无基因集运行时 parameters 与基线一致
+            parameters["gene_set_scoring"] = True
         return parameters
 
 
@@ -114,6 +119,9 @@ def run(config: Config) -> List[str]:
         batch_metadata = read_batch_metadata(
             config.batch_metadata_path, matrix.cell_ids
         )
+    gene_sets = None
+    if config.gene_sets_path is not None:
+        gene_sets = read_gene_sets(config.gene_sets_path)
 
     qc = compute_qc(
         matrix,
@@ -208,6 +216,12 @@ def run(config: Config) -> List[str]:
             )
         selection = None
 
+    # 基因集评分：只用质控后保留细胞与基因；有批次校正时取批次均值中心化值，
+    # 否则取 log 归一化值（即 analysis_values）
+    gene_set_scores = None
+    if gene_sets is not None:
+        gene_set_scores = score_gene_sets(gene_sets, normalized)
+
     markers = find_markers(normalized, clustering.labels)
 
     # 能执行到此处说明实际簇数 >= 2（上方已对不足两簇的数据错误拒绝），
@@ -283,6 +297,21 @@ def run(config: Config) -> List[str]:
             },
         }
 
+    if gene_set_scores is not None:
+        # 记录基因集来源与各集合总/使用基因数；既有 input 字段不变
+        input_info["gene_sets"] = {
+            "name": gene_sets.name,
+            "sha256": gene_sets.sha256,
+            "sets": [
+                {
+                    "set_id": s.set_id,
+                    "n_genes_total": s.n_genes_total,
+                    "n_genes_used": s.n_genes_used,
+                }
+                for s in gene_set_scores.sets
+            ],
+        }
+
     run_info: Dict[str, Any] = {
         "version": __version__,
         "input": input_info,
@@ -320,6 +349,7 @@ def run(config: Config) -> List[str]:
         cluster_selection=selection,
         group_markers=group_markers,
         batch_summary=batch_summary,
+        gene_set_scores=gene_set_scores,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

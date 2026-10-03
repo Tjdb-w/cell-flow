@@ -114,6 +114,35 @@ SHA-256 与质控前后各批次细胞数；`parameters` 增加
 结果一致性保持不变。目标非空或暂存、写出、发布失败报
 `OutputPathError`（退出码 5），同输入同版本的新增结果逐字节一致。
 
+### `--gene-sets`（可选，基因集评分）
+
+`--gene-sets <路径>`（`--key value` 与 `--key=value` 均可）指向一个
+UTF-8 制表符文本，表头恰为 `set_id` 和 `gene_id` 两列；每行一个
+成员关系，字段非空、`(set_id, gene_id)` 组合唯一，且至少有一条
+数据行。文件可为纯文本或单成员 gzip（按内容识别，与文件名无关）。
+内容不合法或 gzip 非单成员流报输入错误（退出码 2），且不改动任何
+已有结果；参数缺值、未知参数或 `--gene-sets=` 空路径报配置错误
+（退出码 3）。不提供该参数时，全部行为与结果文件与基线逐字节一致。
+
+评分只用质控后保留的细胞与基因：有 `--batch-metadata` 时取批次均值
+中心化值，否则取 log 归一化值。基因 ID 与表达矩阵首列精确匹配，
+不做大小写、别名或前缀转换；矩阵之外（含被质控滤除）的基因不计分
+但计入 `n_genes_total`。score 为集合与保留基因交集内表达值的算术
+平均；任一集合交集为空报数据错误（退出码 4）。提供基因集时在既有
+结果之外新增两个文件（其余结果与无基因集运行逐字节一致）：
+
+- `gene_set_scores.tsv`：列为 `set_id`、`n_genes_total`、
+  `n_genes_used`、`cell_id`、`score`；集合按 `set_id` 升序，
+  细胞按保留细胞原顺序。
+- `gene_set_score_chart.tsv`：以 `cell_id`、`cluster` 开头的宽表，
+  集合列按 `set_id` 升序，细胞顺序沿用 `clusters.tsv`。
+
+`run.json` 的 `input.gene_sets` 记录基因集文件名、原始字节 SHA-256
+与各集合的总/使用基因数；`parameters` 增加
+`"gene_set_scoring": true`；既有字段不变。目标非空或暂存、写出、
+发布失败报 `OutputPathError`（退出码 5），同输入同版本的新增结果
+逐字节一致。
+
 ## 约定
 
 - 公开行为以 README 与源码为准。
