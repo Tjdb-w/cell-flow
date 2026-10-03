@@ -4,7 +4,7 @@
 
     cell-flow analyze --input <表达矩阵.tsv|mtx目录> --output-dir <结果目录> \\
         [--input-format tsv|mtx] [--metadata <细胞分组.tsv>] \\
-        [--batch-metadata <细胞批次.tsv>] \\
+        [--batch-metadata <细胞批次.tsv>] [--gene-sets <基因集.tsv>] \\
         [--min-genes 200] [--max-mito-fraction 0.2] [--min-cells 3] \\
         [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617]
 """
@@ -20,7 +20,7 @@ from .pipeline import DEFAULT_SEED, Config, INPUT_FORMATS, run
 USAGE = (
     "用法：cell-flow analyze --input <表达矩阵.tsv|mtx目录> --output-dir <结果目录>\n"
     "                [--input-format tsv|mtx] [--metadata <细胞分组.tsv>]\n"
-    "                [--batch-metadata <细胞批次.tsv>]\n"
+    "                [--batch-metadata <细胞批次.tsv>] [--gene-sets <基因集.tsv>]\n"
     "                [--min-genes N] [--max-mito-fraction F] [--min-cells N]\n"
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
     "                [--n-clusters N|auto] [--seed N]\n"
@@ -65,6 +65,11 @@ def _build_analyze_config(options: dict) -> Config:
         raise _fail_usage("缺少必需参数 --input")
     if options.get("output_dir") is None:
         raise _fail_usage("缺少必需参数 --output-dir")
+    gene_sets_path = options.get("gene_sets")
+    if gene_sets_path == "":
+        # --gene-sets= 属调用不合法（配置错误，退出码 3）；
+        # 内容问题（文件不存在、格式非法）在管线读入阶段按输入错误处理
+        raise _fail_usage("--gene-sets 路径为空")
     return Config(
         input_path=options["input"],
         output_dir=options["output_dir"],
@@ -81,6 +86,7 @@ def _build_analyze_config(options: dict) -> Config:
         input_format=_parse_input_format(options["input_format"]),
         metadata_path=options.get("metadata"),
         batch_metadata_path=options.get("batch_metadata"),
+        gene_sets_path=gene_sets_path,
     )
 
 
@@ -100,6 +106,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--input-format": "input_format",
         "--metadata": "metadata",
         "--batch-metadata": "batch_metadata",
+        "--gene-sets": "gene_sets",
         "--min-genes": "min_genes",
         "--max-mito-fraction": "max_mito_fraction",
         "--min-cells": "min_cells",

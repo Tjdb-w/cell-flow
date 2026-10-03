@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Union
 from . import __version__
 from .batch import BatchSummaryRow, read_batch_metadata
 from .errors import CellFlowConfigError, CellFlowDataError
+from .gene_sets import read_gene_sets, score_gene_sets
 from .io import ExpressionMatrix, read_matrix
 from .kmeans import kmeans
 from .markers import find_group_markers, find_markers, find_pairwise_markers
@@ -39,6 +40,7 @@ class Config:
     input_format: str = FORMAT_TSV
     metadata_path: Optional[str] = None
     batch_metadata_path: Optional[str] = None
+    gene_sets_path: Optional[str] = None
 
     @property
     def auto_clusters(self) -> bool:
@@ -58,6 +60,9 @@ class Config:
         if self.batch_metadata_path is not None:
             # 仅批次校正运行记录该参数；无批次运行时 parameters 与基线一致
             parameters["batch_mean_centering"] = True
+        if self.gene_sets_path is not None:
+            # 仅基因集评分运行记录该参数；未提供时 parameters 与基线一致
+            parameters["gene_set_scoring"] = True
         return parameters
 
 
@@ -114,6 +119,9 @@ def run(config: Config) -> List[str]:
         batch_metadata = read_batch_metadata(
             config.batch_metadata_path, matrix.cell_ids
         )
+    gene_sets = None
+    if config.gene_sets_path is not None:
+        gene_sets = read_gene_sets(config.gene_sets_path)
 
     qc = compute_qc(
         matrix,
@@ -220,6 +228,17 @@ def run(config: Config) -> List[str]:
         cell_groups = [metadata.groups[cell_id] for cell_id in normalized.cell_ids]
         group_markers = find_group_markers(normalized, cell_groups)
 
+    # 基因集评分：用保留基因/细胞；有批次校正取中心化值，否则取 log 归一化值。
+    # 任一集合与保留基因交集为空即在此处（触碰输出目录之前）报数据错误（退出码 4）
+    gene_set_scores = None
+    if gene_sets is not None:
+        gene_set_scores = score_gene_sets(
+            gene_sets,
+            kept_gene_ids=normalized.gene_ids,
+            cell_ids=normalized.cell_ids,
+            analysis_values=normalized.analysis_values,
+        )
+
     # 批次汇总：按 batch 升序，后三项为批次内保留细胞均值
     batch_summary: Optional[List[BatchSummaryRow]] = None
     if batch_metadata is not None:
@@ -282,6 +301,21 @@ def run(config: Config) -> List[str]:
                 for batch in sorted(kept_batch_sizes)
             },
         }
+    if gene_sets is not None and gene_set_scores is not None:
+        # 记录基因集来源、原始字节 SHA-256 与各集合总数/实际使用基因数；
+        # 仅提供 --gene-sets 时出现，既有 input 字段不变
+        input_info["gene_sets"] = {
+            "name": gene_sets.name,
+            "sha256": gene_sets.sha256,
+            "set_sizes": {
+                set_id: gene_set_scores.totals[set_id]
+                for set_id in gene_set_scores.set_order
+            },
+            "set_sizes_used": {
+                set_id: gene_set_scores.used[set_id]
+                for set_id in gene_set_scores.set_order
+            },
+        }
 
     run_info: Dict[str, Any] = {
         "version": __version__,
@@ -320,6 +354,7 @@ def run(config: Config) -> List[str]:
         cluster_selection=selection,
         group_markers=group_markers,
         batch_summary=batch_summary,
+        gene_set_scores=gene_set_scores,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

@@ -13,8 +13,8 @@
 ## 输入
 
 入口仍为 `cell-flow analyze --input <路径> --output-dir <结果目录>`，
-新增可选 `--input-format`（取值 `tsv` 或 `mtx`，默认 `tsv`）。
-`--key value` 与 `--key=value` 两种写法均支持。
+新增可选 `--input-format`（取值 `tsv` 或 `mtx`，默认 `tsv`）与
+`--gene-sets`。`--key value` 与 `--key=value` 两种写法均支持。
 
 ### `tsv`（默认，UTF-8 制表符基因计数矩阵）
 
@@ -113,6 +113,37 @@ SHA-256 与质控前后各批次细胞数；`parameters` 增加
 可与 `--metadata` 并用；TSV、MTX、gzip 各输入承载方式下等价矩阵的
 结果一致性保持不变。目标非空或暂存、写出、发布失败报
 `OutputPathError`（退出码 5），同输入同版本的新增结果逐字节一致。
+
+### `--gene-sets`（可选，基因集评分）
+
+`--gene-sets <路径>`（`--key value` 与 `--key=value` 均可）指向一个
+UTF-8 制表符文本，表头恰为 `set_id`、`gene_id` 两列；每行一个
+成员关系，字段非空、`(set_id, gene_id)` 组合唯一，且至少一条数据行。
+文件可为纯文本或单成员 gzip（按 gzip 魔数识别，与文件名无关）。基因 ID
+与表达矩阵首列**精确匹配**，不做大小写、别名、前缀转换；矩阵外基因
+不计分但计入集合总基因数。文件不是 UTF-8、表头不符、字段为空、成员
+重复、没有数据行，或 gzip 多成员、尾随数据、截断、CRC/长度错误，
+一律报输入错误（退出码 2）且不改动结果。`--gene-sets` 缺值、
+`--gene-sets=` 空路径或出现未知参数报配置错误（退出码 3）。
+
+评分只用质控后保留的细胞与基因：有 `--batch-metadata` 时取批次均值
+中心化值，否则取 log 归一化值。每个集合的 score 是该集合与保留基因
+交集内表达值的算术平均；任一集合交集为空即报数据错误（退出码 4），
+不产出结果。提供该参数时在既有结果之外新增两个文件（其余结果与不提供时
+逐字节一致，`run.json` 除外）：
+
+- `gene_set_scores.tsv`：列为 `set_id`、`n_genes_total`、
+  `n_genes_used`、`cell_id`、`score`，按 `set_id` 升序、集合内
+  沿用保留细胞原顺序排列。
+- `gene_set_score_chart.tsv`：以 `cell_id`、`cluster` 开头，各集合列
+  按 `set_id` 升序排列，细胞顺序沿用 `clusters.tsv`。
+
+`run.json` 的 `input.gene_sets` 记录基因集文件名、原始字节 SHA-256
+与各集合总基因数（`set_sizes`）和实际使用基因数（`set_sizes_used`，
+均按 `set_id` 升序）；`parameters` 增加 `"gene_set_scoring": true`；
+既有字段不变。未提供 `--gene-sets` 时全部行为与基线逐字节一致。
+浮点格式沿用既有结果口径（最短往返表示），重复运行逐字节一致；目标非空
+或暂存、写出、发布失败报 `OutputPathError`（退出码 5）。
 
 ## 约定
 

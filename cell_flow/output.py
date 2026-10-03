@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .errors import OutputPathError
 from .batch import BatchSummaryRow
+from .gene_sets import GeneSetScores
 from .kmeans import KMeansResult
 from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
@@ -57,6 +58,7 @@ class Artifacts:
     cluster_selection: Optional[ClusterSelectionResult] = None
     group_markers: Optional[List[GroupComparison]] = None
     batch_summary: Optional[List[BatchSummaryRow]] = None
+    gene_set_scores: Optional[GeneSetScores] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -541,6 +543,50 @@ def _batch_summary_tsv(rows: List[BatchSummaryRow]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _gene_set_scores_tsv(scores: GeneSetScores) -> str:
+    """set_id 升序、集合内按保留细胞原顺序的逐细胞评分。"""
+    lines = [
+        tsv_row(
+            ["set_id", "n_genes_total", "n_genes_used", "cell_id", "score"]
+        )
+    ]
+    for r in scores.rows:
+        lines.append(
+            tsv_row(
+                [
+                    r.set_id,
+                    r.n_total,
+                    r.n_used,
+                    r.cell_id,
+                    fmt_float(r.score),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _gene_set_score_chart_tsv(
+    scores: GeneSetScores,
+    pca: PCAResult,
+    clustering: KMeansResult,
+) -> str:
+    """宽表：以 cell_id、cluster 开头，集合列按 set_id 升序；
+    细胞顺序沿用 clusters.tsv（即保留细胞原顺序）。"""
+    score_by_cell: Dict[Tuple[str, str], float] = {
+        (r.set_id, r.cell_id): r.score for r in scores.rows
+    }
+    set_order = scores.set_order
+    lines = [tsv_row(["cell_id", "cluster"] + set_order)]
+    for c, cell_id in enumerate(pca.cell_ids):
+        row: List[Any] = [cell_id, clustering.labels[c]]
+        row.extend(
+            fmt_float(score_by_cell[(set_id, cell_id)])
+            for set_id in set_order
+        )
+        lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
 def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
@@ -645,6 +691,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         final_names.append("batch_corrected_expression.tsv")
     if artifacts.batch_summary is not None:
         final_names.append("batch_summary.tsv")
+    if artifacts.gene_set_scores is not None:
+        # 仅 --gene-sets 运行产出基因集评分；未提供时文件集与基线一致
+        final_names.append("gene_set_scores.tsv")
+        final_names.append("gene_set_score_chart.tsv")
     final_names.append("run.json")
 
     payload: List[Tuple[str, str]] = [
@@ -707,6 +757,23 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
     if artifacts.batch_summary is not None:
         payload.append(
             ("batch_summary.tsv", _batch_summary_tsv(artifacts.batch_summary))
+        )
+    if artifacts.gene_set_scores is not None:
+        payload.append(
+            (
+                "gene_set_scores.tsv",
+                _gene_set_scores_tsv(artifacts.gene_set_scores),
+            )
+        )
+        payload.append(
+            (
+                "gene_set_score_chart.tsv",
+                _gene_set_score_chart_tsv(
+                    artifacts.gene_set_scores,
+                    artifacts.pca,
+                    artifacts.clustering,
+                ),
+            )
         )
     payload.append(("run.json", _run_json(artifacts.run_info)))
 
