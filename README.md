@@ -15,6 +15,7 @@
 入口仍为 `cell-flow analyze --input <路径> --output-dir <结果目录>`，
 新增可选 `--input-format`（取值 `tsv` 或 `mtx`，默认 `tsv`）与
 `--gene-sets`。`--key value` 与 `--key=value` 两种写法均支持。
+跨样本批次校正见下文 `--cell-metadata`。
 
 ### `tsv`（默认，UTF-8 制表符基因计数矩阵）
 
@@ -113,6 +114,63 @@ SHA-256 与质控前后各批次细胞数；`parameters` 增加
 可与 `--metadata` 并用；TSV、MTX、gzip 各输入承载方式下等价矩阵的
 结果一致性保持不变。目标非空或暂存、写出、发布失败报
 `OutputPathError`（退出码 5），同输入同版本的新增结果逐字节一致。
+
+### `--cell-metadata`（可选，跨样本批次校正）
+
+`--cell-metadata <路径>`（`--key value` 与 `--key=value` 均可）指向一个
+UTF-8 制表符文本：首列必须是细胞条码列 `cell_id`，并须包含样本标识列
+（默认 `sample_id`，可用 `--sample-column <列名>` 指定）与批次标签列
+（默认 `batch`，可用 `--batch-column <列名>` 指定）；其余列任意，
+原样保留并透传到公开细胞结果，不覆盖、不重命名任何既有字段。
+`cell_id` 唯一且与表达矩阵的全部细胞一一对应（不多不少）；样本标识与
+批次标签均非空——批次标签缺失或为空同样报错，不静默归入未知批次。
+文件可为纯文本或单成员 gzip（按 gzip 魔数识别，与文件名无关）。
+`--cell-metadata` 与 `--batch-metadata` 不能同时使用；`--batch-column`
+与 `--sample-column` 不能为空、不能为 `cell_id`、也不能彼此相同，
+违反报配置错误（退出码 3）。
+
+表达矩阵含重复细胞条码、元数据含重复细胞条码、元数据缺少样本标识列或
+批次标签列、表达矩阵与元数据的细胞集合不一致、批次标签缺失或为空，
+一律抛出 `ValueError`（命令行表现为输入错误，退出码 2），消息指出具体
+冲突类型，且在启动降维聚类之前失败，不生成任何部分成功结果。
+
+校正发生在质量控制之后、降维聚类之前：质控与 log 归一化沿用既有规则，
+随后每个归一化值减去对应批次保留细胞的基因均值，再加回全部保留细胞的
+基因总均值（batch mean centering，与 `--batch-metadata` 同一口径）。
+校正值进入高变基因选择、PCA、聚类、markers、成对 markers、
+`--metadata` 分组差异表达、`--gene-sets` 评分及图表数据；
+`normalized_expression.tsv` 仍写未校正值。质控后仅一个批次时不施加
+任何扰动（校正即恒等），全部既有结果文件与无批次运行逐字节一致。
+不提供该参数时，全部行为与结果文件与基线逐字节一致；已有的质量控制
+阈值、聚类参数、差异表达口径、结果结构和图表数据字段均不变。
+
+提供该参数时（无论一个还是多个批次）在既有结果之外新增以下文件：
+
+- `cell_metadata.tsv`：保留细胞的元数据透传，表头与字段保持输入原样
+  （含全部额外列），行序同 `clusters.tsv`；每行给出该细胞的原始批次。
+- `batch_corrected_expression.tsv`：校正后的表达矩阵，行列顺序与
+  `normalized_expression.tsv` 相同；单批次时与未校正值逐字节一致
+  （即后续聚类和差异表达实际使用数据的等价公开产物）。
+- `batch_summary.tsv`：按 `batch_id` 升序，每行给出 `batch_id`、
+  `n_cells`（批次内保留细胞数）、`total_counts`、`detected_genes`、
+  `mitochondrial_fraction`，后三项为批次内保留细胞的均值。
+- `batch_pca_scatter.tsv`：按批次着色的降维坐标，列为
+  `cell_id`、`batch`、`PC1`、`PC2`，取自实际用于聚类的 PCA 空间。
+- `batch_mixing.tsv`：校正前后各一个批次混合分数（`stage` 为
+  `before`/`after`）。分数按每个细胞的 15 个最近邻（细胞数不足时取
+  细胞数减一）中来自其他批次的细胞占比计算，再对全部细胞求平均；
+  距离为 PCA 坐标上的欧氏距离，并列按细胞顺序确定。`before` 在未校正的
+  归一化 → 高变基因 → PCA 坐标上计算，`after` 在实际用于聚类的（校正后）
+  PCA 坐标上计算；单批次时两者均为 0。
+
+`run.json` 的 `input.cell_metadata` 记录元数据文件名、原始字节 SHA-256、
+批次/样本列名与质控前后各批次细胞数；`parameters` 增加
+`"batch_column"`、`"sample_column"`，实际施加校正时另增
+`"batch_mean_centering": true`；新增顶层 `batch_correction` 记录校正
+方法（`batch_mean_centering` 或 `none_single_batch`）、批次数与校正
+前后混合分数；既有字段不变。相同输入、参数与随机种子结果逐字节一致，
+未显式指定种子时使用固定默认种子，结果同样确定。目标非空或暂存、
+写出、发布失败报 `OutputPathError`（退出码 5）。
 
 ### `--gene-sets`（可选，基因集评分）
 

@@ -1,10 +1,17 @@
 """分析管线编排：参数校验 -> 读入 -> QC -> 归一化/HVG -> PCA -> 聚类 -> 差异表达 -> 写出。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Union
 
 from . import __version__
 from .batch import BatchSummaryRow, read_batch_metadata
+from .cell_metadata import (
+    DEFAULT_BATCH_COLUMN,
+    DEFAULT_SAMPLE_COLUMN,
+    CellBatchReport,
+    batch_mixing_score,
+    read_cell_metadata,
+)
 from .errors import CellFlowConfigError, CellFlowDataError
 from .gene_sets import read_gene_sets, score_gene_sets
 from .io import ExpressionMatrix, read_matrix
@@ -41,6 +48,9 @@ class Config:
     metadata_path: Optional[str] = None
     batch_metadata_path: Optional[str] = None
     gene_sets_path: Optional[str] = None
+    cell_metadata_path: Optional[str] = None
+    batch_column: str = DEFAULT_BATCH_COLUMN
+    sample_column: str = DEFAULT_SAMPLE_COLUMN
 
     @property
     def auto_clusters(self) -> bool:
@@ -63,6 +73,10 @@ class Config:
         if self.gene_sets_path is not None:
             # 仅基因集评分运行记录该参数；未提供时 parameters 与基线一致
             parameters["gene_set_scoring"] = True
+        if self.cell_metadata_path is not None:
+            # 仅跨样本批次校正运行记录列名参数；未提供时 parameters 与基线一致
+            parameters["batch_column"] = self.batch_column
+            parameters["sample_column"] = self.sample_column
         return parameters
 
 
@@ -96,6 +110,25 @@ def validate_config(config: Config) -> None:
         errors.append("--seed 必须是整数")
     if config.input_format not in INPUT_FORMATS:
         errors.append("--input-format 只能是 tsv 或 mtx")
+    if config.cell_metadata_path is not None:
+        if config.batch_metadata_path is not None:
+            errors.append("--cell-metadata 与 --batch-metadata 不能同时使用")
+        if not isinstance(config.batch_column, str) or config.batch_column == "":
+            errors.append("--batch-column 必须是非空字符串")
+        elif config.batch_column == "cell_id":
+            errors.append("--batch-column 不能使用细胞条码列名 cell_id")
+        if not isinstance(config.sample_column, str) or config.sample_column == "":
+            errors.append("--sample-column 必须是非空字符串")
+        elif config.sample_column == "cell_id":
+            errors.append("--sample-column 不能使用细胞条码列名 cell_id")
+        if (
+            isinstance(config.batch_column, str)
+            and isinstance(config.sample_column, str)
+            and config.batch_column != ""
+            and config.sample_column != ""
+            and config.batch_column == config.sample_column
+        ):
+            errors.append("--batch-column 与 --sample-column 不能相同")
     if errors:
         raise CellFlowConfigError("；".join(errors))
 
@@ -118,6 +151,16 @@ def run(config: Config) -> List[str]:
     if config.batch_metadata_path is not None:
         batch_metadata = read_batch_metadata(
             config.batch_metadata_path, matrix.cell_ids
+        )
+    # 跨样本批次校正的细胞元数据同属输入：先完成读取与校验，
+    # 任何不合法（统一为 ValueError）都在降维聚类之前、触碰输出目录之前失败
+    cell_metadata = None
+    if config.cell_metadata_path is not None:
+        cell_metadata = read_cell_metadata(
+            config.cell_metadata_path,
+            matrix.cell_ids,
+            batch_column=config.batch_column,
+            sample_column=config.sample_column,
         )
     gene_sets = None
     if config.gene_sets_path is not None:
@@ -164,10 +207,24 @@ def run(config: Config) -> List[str]:
                 f"无法进行批次校正"
             )
 
+    # 跨样本批次校正：与保留细胞对齐的批次标签。质控后仅一个批次时
+    # 不施加任何扰动（校正即恒等），下游结果与无批次运行逐字节一致
+    cell_batch_labels: Optional[List[str]] = None
+    correction_applied = False
+    if cell_metadata is not None:
+        cell_batch_labels = [
+            cell_metadata.batches[matrix.cell_ids[c]] for c in qc.kept_cells
+        ]
+        correction_applied = len(set(cell_batch_labels)) >= 2
+    # 两种批次输入互斥（validate_config 已拒绝并用），这里取实际生效的标签
+    effective_batch_labels = batch_labels
+    if effective_batch_labels is None and correction_applied:
+        effective_batch_labels = cell_batch_labels
+
     if config.auto_clusters:
         # 自动模式：候选 k=2..min(10, 质控后细胞数)，PCA 后逐个评估
         normalized = normalize_and_select_hvg(
-            matrix, qc, n_hvg=config.n_hvg, batch_labels=batch_labels
+            matrix, qc, n_hvg=config.n_hvg, batch_labels=effective_batch_labels
         )
         if not normalized.selected_genes:
             raise CellFlowDataError("高变基因选择结果为空，PCA 无法成立")
@@ -192,7 +249,7 @@ def run(config: Config) -> List[str]:
             )
 
         normalized = normalize_and_select_hvg(
-            matrix, qc, n_hvg=config.n_hvg, batch_labels=batch_labels
+            matrix, qc, n_hvg=config.n_hvg, batch_labels=effective_batch_labels
         )
         if not normalized.selected_genes:
             raise CellFlowDataError("高变基因选择结果为空，PCA 无法成立")
@@ -215,6 +272,48 @@ def run(config: Config) -> List[str]:
                 f"但数据仅能支撑 {n_found_clusters} 个不同簇（方差不足）"
             )
         selection = None
+
+    # 跨样本批次校正运行始终公开校正后表达：多批次为均值中心化值，
+    # 单批次为与未校正值逐字节一致的拷贝（校正即恒等，不引入扰动）
+    if cell_metadata is not None and normalized.corrected_values is None:
+        normalized = replace(
+            normalized,
+            corrected_values=[list(row) for row in normalized.values],
+        )
+
+    # 批次混合分数：校正后在实际用于聚类的 PCA 坐标上计算；
+    # 校正前在未校正的归一化 -> HVG -> PCA 坐标上计算（单批次时两者相同）
+    cell_batch_report: Optional[CellBatchReport] = None
+    if cell_metadata is not None:
+        assert cell_batch_labels is not None
+        if correction_applied:
+            before_normalized = normalize_and_select_hvg(
+                matrix, qc, n_hvg=config.n_hvg, batch_labels=None
+            )
+            if not before_normalized.selected_genes:
+                # 未校正数据高变基因为空时退回全部保留基因，
+                # 保证校正前低维表示始终可计算
+                before_normalized = replace(
+                    before_normalized,
+                    selected_genes=list(range(len(before_normalized.gene_ids))),
+                )
+            try:
+                before_pca = run_pca(before_normalized, config.n_pcs)
+            except ValueError as exc:
+                raise CellFlowDataError(
+                    f"校正前 PCA 无法成立：{exc}"
+                ) from exc
+            before_scores = before_pca.scores
+        else:
+            before_scores = pca.scores
+        kept_cell_ids = [matrix.cell_ids[c] for c in qc.kept_cells]
+        cell_batch_report = CellBatchReport(
+            columns=cell_metadata.columns,
+            rows=[cell_metadata.rows[cell_id] for cell_id in kept_cell_ids],
+            batches=cell_batch_labels,
+            mixing_before=batch_mixing_score(before_scores, cell_batch_labels),
+            mixing_after=batch_mixing_score(pca.scores, cell_batch_labels),
+        )
 
     markers = find_markers(normalized, clustering.labels)
 
@@ -241,10 +340,15 @@ def run(config: Config) -> List[str]:
 
     # 批次汇总：按 batch 升序，后三项为批次内保留细胞均值
     batch_summary: Optional[List[BatchSummaryRow]] = None
-    if batch_metadata is not None:
+    if batch_metadata is not None or cell_metadata is not None:
+        batch_of = (
+            batch_metadata.batches
+            if batch_metadata is not None
+            else cell_metadata.batches
+        )
         cells_by_batch: Dict[str, List[int]] = {}
         for c in qc.kept_cells:
-            batch = batch_metadata.batches[matrix.cell_ids[c]]
+            batch = batch_of[matrix.cell_ids[c]]
             cells_by_batch.setdefault(batch, []).append(c)
         batch_summary = []
         for batch in sorted(cells_by_batch):
@@ -301,6 +405,23 @@ def run(config: Config) -> List[str]:
                 for batch in sorted(kept_batch_sizes)
             },
         }
+    if cell_metadata is not None:
+        # 记录细胞元数据来源、列名与质控前后各批次细胞数；既有 input 字段不变
+        kept_cell_batch_sizes: Dict[str, int] = {}
+        for c in qc.kept_cells:
+            batch = cell_metadata.batches[matrix.cell_ids[c]]
+            kept_cell_batch_sizes[batch] = kept_cell_batch_sizes.get(batch, 0) + 1
+        input_info["cell_metadata"] = {
+            "name": cell_metadata.name,
+            "sha256": cell_metadata.sha256,
+            "batch_column": config.batch_column,
+            "sample_column": config.sample_column,
+            "batch_sizes": cell_metadata.batch_sizes,
+            "batch_sizes_after_qc": {
+                batch: kept_cell_batch_sizes[batch]
+                for batch in sorted(kept_cell_batch_sizes)
+            },
+        }
     if gene_sets is not None and gene_set_scores is not None:
         # 记录基因集来源、原始字节 SHA-256 与各集合总数/实际使用基因数；
         # 仅提供 --gene-sets 时出现，既有 input 字段不变
@@ -317,10 +438,15 @@ def run(config: Config) -> List[str]:
             },
         }
 
+    parameters = config.public_parameters()
+    if cell_metadata is not None and correction_applied:
+        # 实际施加批次均值中心化时记录；单批次未施加扰动则不记录
+        parameters["batch_mean_centering"] = True
+
     run_info: Dict[str, Any] = {
         "version": __version__,
         "input": input_info,
-        "parameters": config.public_parameters(),
+        "parameters": parameters,
         "stage_counts": {
             "input_cells": matrix.n_cells,
             "input_genes": matrix.n_genes,
@@ -342,6 +468,19 @@ def run(config: Config) -> List[str]:
         },
         "random_seed": config.seed,
     }
+    if cell_batch_report is not None:
+        # 跨样本批次校正汇总：方法、批次数与校正前后混合分数；既有字段不变
+        assert cell_batch_labels is not None
+        run_info["batch_correction"] = {
+            "method": (
+                "batch_mean_centering"
+                if correction_applied
+                else "none_single_batch"
+            ),
+            "n_batches": len(set(cell_batch_labels)),
+            "mixing_score_before": cell_batch_report.mixing_before,
+            "mixing_score_after": cell_batch_report.mixing_after,
+        }
 
     artifacts = Artifacts(
         qc=qc,
@@ -355,6 +494,7 @@ def run(config: Config) -> List[str]:
         group_markers=group_markers,
         batch_summary=batch_summary,
         gene_set_scores=gene_set_scores,
+        cell_batch_report=cell_batch_report,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

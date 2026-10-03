@@ -7,8 +7,13 @@ class CellFlowError(Exception):
     exit_code = 1
 
 
-class CellFlowInputError(CellFlowError):
-    """输入矩阵不合法（空路径、不可读、表头缺失、ID 重复、空矩阵、非法计数）。"""
+class CellFlowInputError(CellFlowError, ValueError):
+    """输入矩阵不合法（空路径、不可读、表头缺失、ID 重复、空矩阵、非法计数）。
+
+    同时是 :class:`ValueError`：输入数据冲突（重复条码、缺少样本标识或
+    批次标签、细胞集合不一致、空批次等）对调用方统一表现为 ValueError，
+    命令行退出码仍保持 2。
+    """
 
     exit_code = 2
 

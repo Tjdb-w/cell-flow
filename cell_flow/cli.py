@@ -5,6 +5,8 @@
     cell-flow analyze --input <表达矩阵.tsv|mtx目录> --output-dir <结果目录> \\
         [--input-format tsv|mtx] [--metadata <细胞分组.tsv>] \\
         [--batch-metadata <细胞批次.tsv>] [--gene-sets <基因集.tsv>] \\
+        [--cell-metadata <细胞元数据.tsv>] [--batch-column batch] \\
+        [--sample-column sample_id] \\
         [--min-genes 200] [--max-mito-fraction 0.2] [--min-cells 3] \\
         [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617]
 """
@@ -13,6 +15,7 @@ import sys
 from typing import Optional, Sequence
 
 from . import __version__
+from .cell_metadata import DEFAULT_BATCH_COLUMN, DEFAULT_SAMPLE_COLUMN
 from .errors import CellFlowError
 from .pca import MAX_PCS
 from .pipeline import DEFAULT_SEED, Config, INPUT_FORMATS, run
@@ -21,6 +24,8 @@ USAGE = (
     "用法：cell-flow analyze --input <表达矩阵.tsv|mtx目录> --output-dir <结果目录>\n"
     "                [--input-format tsv|mtx] [--metadata <细胞分组.tsv>]\n"
     "                [--batch-metadata <细胞批次.tsv>] [--gene-sets <基因集.tsv>]\n"
+    "                [--cell-metadata <细胞元数据.tsv>] [--batch-column 列名]\n"
+    "                [--sample-column 列名]\n"
     "                [--min-genes N] [--max-mito-fraction F] [--min-cells N]\n"
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
     "                [--n-clusters N|auto] [--seed N]\n"
@@ -70,6 +75,10 @@ def _build_analyze_config(options: dict) -> Config:
         # --gene-sets= 属调用不合法（配置错误，退出码 3）；
         # 内容问题（文件不存在、格式非法）在管线读入阶段按输入错误处理
         raise _fail_usage("--gene-sets 路径为空")
+    cell_metadata_path = options.get("cell_metadata")
+    if cell_metadata_path == "":
+        # --cell-metadata= 同上：空路径属配置错误
+        raise _fail_usage("--cell-metadata 路径为空")
     return Config(
         input_path=options["input"],
         output_dir=options["output_dir"],
@@ -87,6 +96,9 @@ def _build_analyze_config(options: dict) -> Config:
         metadata_path=options.get("metadata"),
         batch_metadata_path=options.get("batch_metadata"),
         gene_sets_path=gene_sets_path,
+        cell_metadata_path=cell_metadata_path,
+        batch_column=options["batch_column"],
+        sample_column=options["sample_column"],
     )
 
 
@@ -107,6 +119,9 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--metadata": "metadata",
         "--batch-metadata": "batch_metadata",
         "--gene-sets": "gene_sets",
+        "--cell-metadata": "cell_metadata",
+        "--batch-column": "batch_column",
+        "--sample-column": "sample_column",
         "--min-genes": "min_genes",
         "--max-mito-fraction": "max_mito_fraction",
         "--min-cells": "min_cells",
@@ -126,6 +141,8 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "n_pcs": str(MAX_PCS),
         "n_clusters": "2",
         "seed": str(DEFAULT_SEED),
+        "batch_column": DEFAULT_BATCH_COLUMN,
+        "sample_column": DEFAULT_SAMPLE_COLUMN,
     }
 
     index = 0

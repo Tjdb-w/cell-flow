@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .errors import OutputPathError
 from .batch import BatchSummaryRow
+from .cell_metadata import CellBatchReport
 from .gene_sets import GeneSetScores
 from .kmeans import KMeansResult
 from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
@@ -59,6 +60,7 @@ class Artifacts:
     group_markers: Optional[List[GroupComparison]] = None
     batch_summary: Optional[List[BatchSummaryRow]] = None
     gene_set_scores: Optional[GeneSetScores] = None
+    cell_batch_report: Optional[CellBatchReport] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -587,6 +589,41 @@ def _gene_set_score_chart_tsv(
     return "\n".join(lines) + "\n"
 
 
+def _cell_metadata_tsv(report: CellBatchReport) -> str:
+    """保留细胞的元数据透传：表头与字段保持输入原样，行序同 clusters.tsv。"""
+    lines = [tsv_row(report.columns)]
+    for row in report.rows:
+        lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
+def _batch_pca_scatter_tsv(report: CellBatchReport, pca: PCAResult) -> str:
+    """按批次着色的降维坐标：实际用于聚类的 PCA 空间（校正后为校正空间）。"""
+    lines = [tsv_row(["cell_id", "batch", "PC1", "PC2"])]
+    for c, cell_id in enumerate(pca.cell_ids):
+        pc1 = pca.scores[c][0] if pca.n_pcs >= 1 else 0.0
+        pc2 = pca.scores[c][1] if pca.n_pcs >= 2 else 0.0
+        lines.append(
+            tsv_row(
+                [
+                    cell_id,
+                    report.batches[c],
+                    fmt_float(pc1),
+                    fmt_float(pc2),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _batch_mixing_tsv(report: CellBatchReport) -> str:
+    """校正前后各一个批次混合分数（15 最近邻中其他批次占比的均值）。"""
+    lines = [tsv_row(["stage", "mixing_score"])]
+    lines.append(tsv_row(["before", fmt_float(report.mixing_before)]))
+    lines.append(tsv_row(["after", fmt_float(report.mixing_after)]))
+    return "\n".join(lines) + "\n"
+
+
 def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
@@ -695,6 +732,11 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         # 仅 --gene-sets 运行产出基因集评分；未提供时文件集与基线一致
         final_names.append("gene_set_scores.tsv")
         final_names.append("gene_set_score_chart.tsv")
+    if artifacts.cell_batch_report is not None:
+        # 仅 --cell-metadata 运行产出跨样本批次校正产物；未提供时文件集不变
+        final_names.append("cell_metadata.tsv")
+        final_names.append("batch_pca_scatter.tsv")
+        final_names.append("batch_mixing.tsv")
     final_names.append("run.json")
 
     payload: List[Tuple[str, str]] = [
@@ -774,6 +816,19 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                     artifacts.clustering,
                 ),
             )
+        )
+    if artifacts.cell_batch_report is not None:
+        payload.append(
+            ("cell_metadata.tsv", _cell_metadata_tsv(artifacts.cell_batch_report))
+        )
+        payload.append(
+            (
+                "batch_pca_scatter.tsv",
+                _batch_pca_scatter_tsv(artifacts.cell_batch_report, artifacts.pca),
+            )
+        )
+        payload.append(
+            ("batch_mixing.tsv", _batch_mixing_tsv(artifacts.cell_batch_report))
         )
     payload.append(("run.json", _run_json(artifacts.run_info)))
 
