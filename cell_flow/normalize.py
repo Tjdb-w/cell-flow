@@ -65,7 +65,7 @@ def normalize_and_select_hvg(
         values.append(normalized_row)
 
     corrected = None
-    if batch_labels is not None:
+    if batch_labels is not None and len(set(batch_labels)) >= 2:
         corrected = center_by_batch(values, batch_labels)
     selected = _select_highly_variable(
         gene_ids, corrected if corrected is not None else values, n_hvg

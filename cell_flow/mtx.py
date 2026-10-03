@@ -100,12 +100,15 @@ def _read_id_lines(
     *,
     first_column_only: bool,
     kind: str,
+    allow_duplicates: bool = False,
 ) -> List[str]:
     """读取 ID 列表。
 
     barcodes：每个非空行整体是一个细胞 ID；
     features：每个非空数据行取第一列作为基因 ID。
-    空行跳过，空 ID 与重复 ID 均非法。ID 按文件行序排列。
+    空行跳过，空 ID 非法；默认重复 ID 也非法，``allow_duplicates``
+    为真时保留重复（供批次功能读取后统一按 :class:`ValueError` 报告）。
+    ID 按文件行序排列。
     """
     ids: List[str] = []
     seen = set()
@@ -115,7 +118,7 @@ def _read_id_lines(
         token = line.split("\t", 1)[0] if first_column_only else line
         if token == "":
             _fail(f"{path} 第 {line_no} 行{kind} ID 为空")
-        if token in seen:
+        if token in seen and not allow_duplicates:
             _fail(f"{kind} ID 重复：{token!r}")
         seen.add(token)
         ids.append(token)
@@ -293,8 +296,14 @@ def _parse_matrix(
     return n_rows, n_cols, entries
 
 
-def read_mtx_directory(directory: str) -> ExpressionMatrix:
-    """读取并严格校验一个 10x MatrixMarket 目录。"""
+def read_mtx_directory(
+    directory: str, *, allow_duplicate_cells: bool = False
+) -> ExpressionMatrix:
+    """读取并严格校验一个 10x MatrixMarket 目录。
+
+    ``allow_duplicate_cells`` 为真时保留 barcodes 中的重复细胞条码
+    （供批次功能读取后统一按 :class:`ValueError` 报告条码冲突）。
+    """
     if directory is None or directory == "":
         _fail("输入路径为空")
     if not os.path.exists(directory):
@@ -328,6 +337,7 @@ def read_mtx_directory(directory: str) -> ExpressionMatrix:
         os.path.join(directory, barcodes_actual),
         first_column_only=False,
         kind="细胞",
+        allow_duplicates=allow_duplicate_cells,
     )
     gene_ids = _read_id_lines(
         features_text,

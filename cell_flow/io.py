@@ -12,7 +12,7 @@ import os
 import re
 import zlib
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Sequence
 
 from .errors import CellFlowInputError
 
@@ -97,7 +97,14 @@ def _parse_count(raw: str, gene_id: str, cell_id: str, row_no: int) -> int:
     return int(raw)
 
 
-def read_matrix(path: str) -> ExpressionMatrix:
+def read_matrix(
+    path: str, *, allow_duplicate_cells: bool = False
+) -> ExpressionMatrix:
+    """读取 TSV 计数矩阵。
+
+    ``allow_duplicate_cells`` 为真时保留重复细胞条码（供批次功能在读取后
+    统一按 :class:`ValueError` 报告条码冲突）；默认仍对重复条码报输入错误。
+    """
     if path is None or path == "":
         _fail("输入路径为空")
     if not os.path.exists(path):
@@ -136,9 +143,9 @@ def read_matrix(path: str) -> ExpressionMatrix:
     cell_ids = header[1:]
     if any(cell == "" for cell in cell_ids):
         _fail("表头存在空细胞 ID")
-    if len(set(cell_ids)) != len(cell_ids):
-        dup = _first_duplicate(cell_ids)
-        _fail(f"细胞 ID 重复：{dup!r}")
+    duplicate_cell = find_duplicate(cell_ids)
+    if duplicate_cell and not allow_duplicate_cells:
+        _fail(f"细胞 ID 重复：{duplicate_cell!r}")
 
     gene_ids: List[str] = []
     counts: List[List[int]] = []
@@ -184,10 +191,11 @@ def read_matrix(path: str) -> ExpressionMatrix:
     )
 
 
-def _first_duplicate(values: List[str]) -> str:
+def find_duplicate(values: Sequence[str]) -> str:
+    """返回第一个重复出现的值；无重复时返回空串。"""
     seen = set()
     for value in values:
         if value in seen:
             return value
         seen.add(value)
-    return values[0]
+    return ""

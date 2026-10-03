@@ -4,7 +4,9 @@
 
     cell-flow analyze --input <表达矩阵.tsv|mtx目录> --output-dir <结果目录> \\
         [--input-format tsv|mtx] [--metadata <细胞分组.tsv>] \\
-        [--batch-metadata <细胞批次.tsv>] [--gene-sets <基因集.tsv>] \\
+        [--batch-metadata <细胞批次.tsv>] \\
+        [--batch-column 列名] [--sample-column 列名] \\
+        [--gene-sets <基因集.tsv>] \\
         [--min-genes 200] [--max-mito-fraction 0.2] [--min-cells 3] \\
         [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617]
 """
@@ -20,7 +22,9 @@ from .pipeline import DEFAULT_SEED, Config, INPUT_FORMATS, run
 USAGE = (
     "用法：cell-flow analyze --input <表达矩阵.tsv|mtx目录> --output-dir <结果目录>\n"
     "                [--input-format tsv|mtx] [--metadata <细胞分组.tsv>]\n"
-    "                [--batch-metadata <细胞批次.tsv>] [--gene-sets <基因集.tsv>]\n"
+    "                [--batch-metadata <细胞批次.tsv>]\n"
+    "                [--batch-column 列名] [--sample-column 列名]\n"
+    "                [--gene-sets <基因集.tsv>]\n"
     "                [--min-genes N] [--max-mito-fraction F] [--min-cells N]\n"
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
     "                [--n-clusters N|auto] [--seed N]\n"
@@ -86,6 +90,8 @@ def _build_analyze_config(options: dict) -> Config:
         input_format=_parse_input_format(options["input_format"]),
         metadata_path=options.get("metadata"),
         batch_metadata_path=options.get("batch_metadata"),
+        batch_column=options.get("batch_column", "batch"),
+        sample_column=options.get("sample_column", "sample_id"),
         gene_sets_path=gene_sets_path,
     )
 
@@ -106,6 +112,8 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--input-format": "input_format",
         "--metadata": "metadata",
         "--batch-metadata": "batch_metadata",
+        "--batch-column": "batch_column",
+        "--sample-column": "sample_column",
         "--gene-sets": "gene_sets",
         "--min-genes": "min_genes",
         "--max-mito-fraction": "max_mito_fraction",
