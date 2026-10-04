@@ -249,6 +249,37 @@ SHA-256、质控前各样体细胞数（`sample_sizes`，按输入细胞首次�
 新增文件沿用事务性发布与最短往返浮点格式，同输入同版本逐字节一致；
 目标目录问题仍由 `OutputPathError`（退出码 5）报告。
 
+### `--detect-doublets` / `--expected-doublet-rate`（可选，双细胞识别与过滤）
+
+`--detect-doublets` 是无值开关；`--expected-doublet-rate` 取 `[0, 1)` 内的
+有限数值，缺省 `0.08`，仅在启用开关时有效。只给 rate 而不给开关、rate
+缺值或非法（非数值、非有限、越界）、未知参数一律报配置错误（退出码 3）。
+
+启用后以 QC 候选细胞 × 候选基因的原始计数子矩阵计算确定性的
+`doublet_score`：用 `--seed` 派生的确定性伪随机合成“两个候选细胞计数
+叠加”的模拟双细胞，候选细胞与其最相似模拟双细胞的余弦相似度均值即评分，
+用以区分双细胞叠加谱与单细胞谱；同输入、同 seed、同参数下逐比特可复现。
+目标标记数按候选细胞数与 rate 计算，分数降序、同分按原列序依次标记；
+rate 为 0 不标记，且任何情况下至少保留一个细胞。过滤后按 `--min-cells`
+在最终细胞上重算保留基因，归一化、HVG、PCA、聚类、差异表达等下游阶段
+只用最终细胞与基因。候选或过滤后细胞不足两个、过滤后无保留基因报数据
+错误（退出码 4）；目录非空、暂存或发布失败仍报 `OutputPathError`
+（退出码 5），分析阶段失败不创建或改动结果目录。
+
+新增两个结果文件（随既有结果事务性发布，未启用时文件集与基线一致）：
+
+- `doublet_scores.tsv`：列 QC 候选细胞原序，含 `cell_id`、`doublet_score`、
+  `doublet_rank`、`doublet_flag`、`retained_after_doublet_filter`；
+  `doublet_rank` 自 1 起，`doublet_flag` 为是否被过滤，浮点最短往返。
+- `doublet_score_chart.tsv`：按分数分 20 个等宽箱，列 `bin_start`、
+  `bin_end`、`cell_count`；空箱保留，边界由分数最小/最大值确定。
+
+`run.json` 的 `parameters` 增加 `"detect_doublets": true` 与
+`"expected-doublet-rate"`；`stage_counts` 增加 `doublet_candidates`、
+`doublets_flagged`、`cells_after_doublet_filter`、
+`genes_after_doublet_filter`、`final_cells` 与 `final_genes`。
+其余字段不变；未启用时输入、结果与退出码与基线完全一致。
+
 ## 约定
 
 - 公开行为以 README 与源码为准。

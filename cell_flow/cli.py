@@ -8,7 +8,8 @@
         [--cell-metadata <细胞元数据.tsv>] [--batch-column batch] \\
         [--sample-column sample_id] [--replicate-metadata <重复元数据.tsv>] \\
         [--min-genes 200] [--max-mito-fraction 0.2] [--min-cells 3] \\
-        [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617]
+        [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617] \\
+        [--detect-doublets] [--expected-doublet-rate 0.08]
 """
 
 import sys
@@ -29,6 +30,7 @@ USAGE = (
     "                [--min-genes N] [--max-mito-fraction F] [--min-cells N]\n"
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
     "                [--n-clusters N|auto] [--seed N]\n"
+    "                [--detect-doublets] [--expected-doublet-rate F]\n"
     "      cell-flow --version"
 )
 
@@ -104,6 +106,10 @@ def _build_analyze_config(options: dict) -> Config:
         batch_column=options["batch_column"],
         sample_column=options["sample_column"],
         replicate_metadata_path=replicate_metadata_path,
+        detect_doublets=bool(options.get("detect_doublets")),
+        expected_doublet_rate=_parse_float(
+            "--expected-doublet-rate", options["expected_doublet_rate"]
+        ),
     )
 
 
@@ -136,6 +142,11 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--n-pcs": "n_pcs",
         "--n-clusters": "n_clusters",
         "--seed": "seed",
+        "--expected-doublet-rate": "expected_doublet_rate",
+    }
+    # 无值开关参数；--detect-doublets=x 形式按未知参数拒绝
+    flag_options = {
+        "--detect-doublets": "detect_doublets",
     }
     options = {
         "input_format": "tsv",
@@ -149,8 +160,10 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "seed": str(DEFAULT_SEED),
         "batch_column": DEFAULT_BATCH_COLUMN,
         "sample_column": DEFAULT_SAMPLE_COLUMN,
+        "expected_doublet_rate": "0.08",
     }
 
+    explicit = set()
     index = 0
     while index < len(argv):
         token = argv[index]
@@ -159,15 +172,25 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
             if key not in value_options:
                 raise _fail_usage(f"未知参数 {key}")
             options[value_options[key]] = raw_value
+            explicit.add(value_options[key])
             index += 1
             continue
         if token in value_options:
             if index + 1 >= len(argv):
                 raise _fail_usage(f"参数 {token} 缺少取值")
             options[value_options[token]] = argv[index + 1]
+            explicit.add(value_options[token])
             index += 2
             continue
+        if token in flag_options:
+            options[flag_options[token]] = True
+            index += 1
+            continue
         raise _fail_usage(f"无法识别的参数或多余位置参数：{token}")
+
+    if "expected_doublet_rate" in explicit and not options.get("detect_doublets"):
+        # 只给 --expected-doublet-rate 而不启用双细胞识别属配置错误
+        raise _fail_usage("--expected-doublet-rate 需与 --detect-doublets 同时使用")
 
     return _build_analyze_config(options)
 

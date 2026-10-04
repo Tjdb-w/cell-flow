@@ -12,6 +12,7 @@ from .cell_metadata import (
     batch_mixing_score,
     read_cell_metadata,
 )
+from .doublets import DoubletResult, detect_doublets
 from .errors import CellFlowConfigError, CellFlowDataError
 from .gene_sets import read_gene_sets, score_gene_sets
 from .io import ExpressionMatrix, read_matrix
@@ -53,6 +54,8 @@ class Config:
     batch_column: str = DEFAULT_BATCH_COLUMN
     sample_column: str = DEFAULT_SAMPLE_COLUMN
     replicate_metadata_path: Optional[str] = None
+    detect_doublets: bool = False
+    expected_doublet_rate: float = 0.08
 
     @property
     def auto_clusters(self) -> bool:
@@ -82,6 +85,10 @@ class Config:
         if self.replicate_metadata_path is not None:
             # 仅 pseudobulk 运行记录该参数；未提供时 parameters 与基线一致
             parameters["pseudobulk_de"] = True
+        if self.detect_doublets:
+            # 仅双细胞识别运行记录这两个参数；未启用时 parameters 与基线一致
+            parameters["detect_doublets"] = True
+            parameters["expected-doublet-rate"] = self.expected_doublet_rate
         return parameters
 
 
@@ -115,6 +122,14 @@ def validate_config(config: Config) -> None:
         errors.append("--seed 必须是整数")
     if config.input_format not in INPUT_FORMATS:
         errors.append("--input-format 只能是 tsv 或 mtx")
+    if not isinstance(config.detect_doublets, bool):
+        errors.append("--detect-doublets 必须是无值开关参数")
+    if (
+        not isinstance(config.expected_doublet_rate, (int, float))
+        or isinstance(config.expected_doublet_rate, bool)
+        or not 0.0 <= float(config.expected_doublet_rate) < 1.0
+    ):
+        errors.append("--expected-doublet-rate 必须是 [0, 1) 内的有限数值")
     if config.cell_metadata_path is not None:
         if config.batch_metadata_path is not None:
             errors.append("--cell-metadata 与 --batch-metadata 不能同时使用")
@@ -184,19 +199,49 @@ def run(config: Config) -> List[str]:
         mito_prefix=config.mito_prefix,
     )
 
-    n_kept_cells = len(qc.kept_cells)
-    if n_kept_cells < 2:
+    n_qc_cells = len(qc.kept_cells)
+    if n_qc_cells < 2:
         raise CellFlowDataError(
-            f"质控后仅保留 {n_kept_cells} 个细胞，不足两个，无法分析"
+            f"质控后仅保留 {n_qc_cells} 个细胞，不足两个，无法分析"
         )
     if not qc.kept_genes:
         raise CellFlowDataError(
             f"没有基因在至少 {config.min_cells} 个细胞中检出，无可用基因"
         )
 
+    # 可选双细胞识别：以 QC 候选细胞 × 候选基因的原始计数子矩阵评分，
+    # 按 rate 标记后在最终细胞上按 min_cells 重算基因；下游只用最终细胞与基因。
+    # 未启用时 analysis_qc 即原 QC 结果，下游行为与基线逐字节一致
+    doublets: Optional[DoubletResult] = None
+    analysis_qc = qc
+    if config.detect_doublets:
+        doublets = detect_doublets(
+            matrix,
+            qc,
+            rate=config.expected_doublet_rate,
+            min_cells=config.min_cells,
+            seed=config.seed,
+        )
+        n_after_doublet = len(doublets.kept_cells)
+        if n_after_doublet < 2:
+            raise CellFlowDataError(
+                f"双细胞过滤后仅保留 {n_after_doublet} 个细胞，"
+                f"不足两个，无法分析"
+            )
+        if not doublets.kept_genes:
+            raise CellFlowDataError(
+                f"双细胞过滤后没有基因在至少 {config.min_cells} 个细胞中检出，"
+                f"无可用基因"
+            )
+        analysis_qc = replace(
+            qc, kept_cells=doublets.kept_cells, kept_genes=doublets.kept_genes
+        )
+
+    n_kept_cells = len(analysis_qc.kept_cells)
+
     if metadata is not None:
         kept_groups = {
-            metadata.groups[matrix.cell_ids[c]] for c in qc.kept_cells
+            metadata.groups[matrix.cell_ids[c]] for c in analysis_qc.kept_cells
         }
         if len(kept_groups) < 2:
             raise CellFlowDataError(
@@ -208,7 +253,7 @@ def run(config: Config) -> List[str]:
     if batch_metadata is not None:
         # 与保留细胞（列序）对齐的批次标签；质控后不足两个批次无法校正
         batch_labels = [
-            batch_metadata.batches[matrix.cell_ids[c]] for c in qc.kept_cells
+            batch_metadata.batches[matrix.cell_ids[c]] for c in analysis_qc.kept_cells
         ]
         n_kept_batches = len(set(batch_labels))
         if n_kept_batches < 2:
@@ -223,7 +268,7 @@ def run(config: Config) -> List[str]:
     correction_applied = False
     if cell_metadata is not None:
         cell_batch_labels = [
-            cell_metadata.batches[matrix.cell_ids[c]] for c in qc.kept_cells
+            cell_metadata.batches[matrix.cell_ids[c]] for c in analysis_qc.kept_cells
         ]
         correction_applied = len(set(cell_batch_labels)) >= 2
     # 两种批次输入互斥（validate_config 已拒绝并用），这里取实际生效的标签
@@ -234,7 +279,7 @@ def run(config: Config) -> List[str]:
     if config.auto_clusters:
         # 自动模式：候选 k=2..min(10, 质控后细胞数)，PCA 后逐个评估
         normalized = normalize_and_select_hvg(
-            matrix, qc, n_hvg=config.n_hvg, batch_labels=effective_batch_labels
+            matrix, analysis_qc, n_hvg=config.n_hvg, batch_labels=effective_batch_labels
         )
         if not normalized.selected_genes:
             raise CellFlowDataError("高变基因选择结果为空，PCA 无法成立")
@@ -259,7 +304,7 @@ def run(config: Config) -> List[str]:
             )
 
         normalized = normalize_and_select_hvg(
-            matrix, qc, n_hvg=config.n_hvg, batch_labels=effective_batch_labels
+            matrix, analysis_qc, n_hvg=config.n_hvg, batch_labels=effective_batch_labels
         )
         if not normalized.selected_genes:
             raise CellFlowDataError("高变基因选择结果为空，PCA 无法成立")
@@ -298,7 +343,7 @@ def run(config: Config) -> List[str]:
         assert cell_batch_labels is not None
         if correction_applied:
             before_normalized = normalize_and_select_hvg(
-                matrix, qc, n_hvg=config.n_hvg, batch_labels=None
+                matrix, analysis_qc, n_hvg=config.n_hvg, batch_labels=None
             )
             if not before_normalized.selected_genes:
                 # 未校正数据高变基因为空时退回全部保留基因，
@@ -316,7 +361,7 @@ def run(config: Config) -> List[str]:
             before_scores = before_pca.scores
         else:
             before_scores = pca.scores
-        kept_cell_ids = [matrix.cell_ids[c] for c in qc.kept_cells]
+        kept_cell_ids = [matrix.cell_ids[c] for c in analysis_qc.kept_cells]
         cell_batch_report = CellBatchReport(
             columns=cell_metadata.columns,
             rows=[cell_metadata.rows[cell_id] for cell_id in kept_cell_ids],
@@ -353,7 +398,7 @@ def run(config: Config) -> List[str]:
     # 质控后样本无细胞、group 有效重复不足两个或不足两个 group 在此报数据错误
     pseudobulk: Optional[PseudobulkData] = None
     if replicate_metadata is not None:
-        pseudobulk = build_pseudobulk(matrix, qc, replicate_metadata)
+        pseudobulk = build_pseudobulk(matrix, analysis_qc, replicate_metadata)
 
     # 批次汇总：按 batch 升序，后三项为批次内保留细胞均值
     batch_summary: Optional[List[BatchSummaryRow]] = None
@@ -364,7 +409,7 @@ def run(config: Config) -> List[str]:
             else cell_metadata.batches
         )
         cells_by_batch: Dict[str, List[int]] = {}
-        for c in qc.kept_cells:
+        for c in analysis_qc.kept_cells:
             batch = batch_of[matrix.cell_ids[c]]
             cells_by_batch.setdefault(batch, []).append(c)
         batch_summary = []
@@ -410,7 +455,7 @@ def run(config: Config) -> List[str]:
     if batch_metadata is not None:
         # 记录批次元数据来源与质控前后各批次细胞数；既有 input 字段不变
         kept_batch_sizes: Dict[str, int] = {}
-        for c in qc.kept_cells:
+        for c in analysis_qc.kept_cells:
             batch = batch_metadata.batches[matrix.cell_ids[c]]
             kept_batch_sizes[batch] = kept_batch_sizes.get(batch, 0) + 1
         input_info["batch_metadata"] = {
@@ -425,7 +470,7 @@ def run(config: Config) -> List[str]:
     if cell_metadata is not None:
         # 记录细胞元数据来源、列名与质控前后各批次细胞数；既有 input 字段不变
         kept_cell_batch_sizes: Dict[str, int] = {}
-        for c in qc.kept_cells:
+        for c in analysis_qc.kept_cells:
             batch = cell_metadata.batches[matrix.cell_ids[c]]
             kept_cell_batch_sizes[batch] = kept_cell_batch_sizes.get(batch, 0) + 1
         input_info["cell_metadata"] = {
@@ -458,7 +503,7 @@ def run(config: Config) -> List[str]:
         # 记录重复元数据来源、样本与分组规模及质控前后样本/重复数；
         # 仅提供 --replicate-metadata 时出现，既有 input 字段不变
         kept_sample_sizes: Dict[str, int] = {}
-        for c in qc.kept_cells:
+        for c in analysis_qc.kept_cells:
             sample_id = replicate_metadata.samples[matrix.cell_ids[c]]
             kept_sample_sizes[sample_id] = kept_sample_sizes.get(sample_id, 0) + 1
         kept_groups = sorted(
@@ -496,9 +541,9 @@ def run(config: Config) -> List[str]:
         "stage_counts": {
             "input_cells": matrix.n_cells,
             "input_genes": matrix.n_genes,
-            "cells_after_qc": n_kept_cells,
+            "cells_after_qc": len(qc.kept_cells),
             "genes_after_qc": len(qc.kept_genes),
-            "cells_filtered_out": matrix.n_cells - n_kept_cells,
+            "cells_filtered_out": matrix.n_cells - len(qc.kept_cells),
             "genes_filtered_out": matrix.n_genes - len(qc.kept_genes),
             "highly_variable_genes": len(normalized.selected_genes),
             "max_pcs_parameter": MAX_PCS,
@@ -509,11 +554,23 @@ def run(config: Config) -> List[str]:
                 else len(cluster_sizes)
             ),
             "cluster_sizes": [cluster_sizes[k] for k in sorted(cluster_sizes)],
-            "marker_tests": len(markers) * len(qc.kept_genes),
+            "marker_tests": len(markers) * len(analysis_qc.kept_genes),
             "kmeans_iterations": clustering.iterations,
         },
         "random_seed": config.seed,
     }
+    if doublets is not None:
+        # 双细胞识别运行记录候选/标记/过滤后计数与最终细胞、基因数；
+        # 未启用时 stage_counts 与基线一致
+        stage_counts = run_info["stage_counts"]
+        stage_counts["doublet_candidates"] = len(doublets.cell_ids)
+        stage_counts["doublets_flagged"] = sum(
+            1 for flag in doublets.flags if flag
+        )
+        stage_counts["cells_after_doublet_filter"] = len(doublets.kept_cells)
+        stage_counts["genes_after_doublet_filter"] = len(doublets.kept_genes)
+        stage_counts["final_cells"] = len(doublets.kept_cells)
+        stage_counts["final_genes"] = len(doublets.kept_genes)
     if pseudobulk is not None:
         # pseudobulk 运行记录样本/分组数与检验计数；未提供重复元数据时字段不变
         n_pseudobulk_genes = len(pseudobulk.gene_ids)
@@ -554,6 +611,7 @@ def run(config: Config) -> List[str]:
         gene_set_scores=gene_set_scores,
         cell_batch_report=cell_batch_report,
         pseudobulk=pseudobulk,
+        doublets=doublets,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .errors import OutputPathError
 from .batch import BatchSummaryRow
 from .cell_metadata import CellBatchReport
+from .doublets import DoubletResult
 from .gene_sets import GeneSetScores
 from .kmeans import KMeansResult
 from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
@@ -63,6 +64,7 @@ class Artifacts:
     gene_set_scores: Optional[GeneSetScores] = None
     cell_batch_report: Optional[CellBatchReport] = None
     pseudobulk: Optional[PseudobulkData] = None
+    doublets: Optional[DoubletResult] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -640,6 +642,61 @@ def _batch_mixing_tsv(report: CellBatchReport) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _doublet_scores_tsv(result: DoubletResult) -> str:
+    """QC 候选细胞（原列序）的逐细胞双细胞评分；rank 自 1 起。"""
+    lines = [
+        tsv_row(
+            [
+                "cell_id",
+                "doublet_score",
+                "doublet_rank",
+                "doublet_flag",
+                "retained_after_doublet_filter",
+            ]
+        )
+    ]
+    for i, cell_id in enumerate(result.cell_ids):
+        lines.append(
+            tsv_row(
+                [
+                    cell_id,
+                    fmt_float(result.scores[i]),
+                    result.ranks[i],
+                    fmt_bool(result.flags[i]),
+                    fmt_bool(not result.flags[i]),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _doublet_score_chart_tsv(result: DoubletResult) -> str:
+    """doublet_score 的 20 个等宽箱；空箱保留，边界由分数最小/最大值确定。"""
+    lines = [tsv_row(["bin_start", "bin_end", "cell_count"])]
+    scores = result.scores
+    lo = min(scores)
+    hi = max(scores)
+    width = (hi - lo) / HIST_BINS
+    counts = [0] * HIST_BINS
+    for value in scores:
+        if width <= 0.0:
+            idx = 0
+        else:
+            idx = int((value - lo) / width)
+            if idx < 0:
+                idx = 0
+            elif idx >= HIST_BINS:
+                idx = HIST_BINS - 1
+        counts[idx] += 1
+    for b in range(HIST_BINS):
+        start = lo + b * width
+        end = lo + (b + 1) * width if width > 0.0 else hi
+        lines.append(
+            tsv_row([fmt_float(start), fmt_float(end), counts[b]])
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
@@ -758,6 +815,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         final_names.append("pseudobulk_expression.tsv")
         final_names.append("pseudobulk_group_markers.tsv")
         final_names.append("pseudobulk_marker_chart.tsv")
+    if artifacts.doublets is not None:
+        # 仅 --detect-doublets 运行产出双细胞评分产物；未启用时文件集不变
+        final_names.append("doublet_scores.tsv")
+        final_names.append("doublet_score_chart.tsv")
     final_names.append("run.json")
 
     payload: List[Tuple[str, str]] = [
@@ -868,6 +929,16 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             (
                 "pseudobulk_marker_chart.tsv",
                 _group_marker_chart_tsv(artifacts.pseudobulk.comparisons),
+            )
+        )
+    if artifacts.doublets is not None:
+        payload.append(
+            ("doublet_scores.tsv", _doublet_scores_tsv(artifacts.doublets))
+        )
+        payload.append(
+            (
+                "doublet_score_chart.tsv",
+                _doublet_score_chart_tsv(artifacts.doublets),
             )
         )
     payload.append(("run.json", _run_json(artifacts.run_info)))
