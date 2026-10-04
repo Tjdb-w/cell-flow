@@ -13,7 +13,13 @@ from .cell_metadata import (
     read_cell_metadata,
 )
 from .doublets import DoubletResult, detect_doublets
-from .errors import CellFlowConfigError, CellFlowDataError
+from .errors import (
+    CellFlowConfigError,
+    CellFlowConfigValueError,
+    CellFlowDataError,
+    CellFlowDataValueError,
+    CellFlowError,
+)
 from .gene_sets import read_gene_sets, score_gene_sets
 from .io import ExpressionMatrix, read_matrix
 from .kmeans import kmeans
@@ -26,6 +32,12 @@ from .pca import MAX_PCS, run_pca
 from .qc import compute_qc
 from .replicate import PseudobulkData, build_pseudobulk, read_replicate_metadata
 from .selection import select_cluster_count
+from .stability import (
+    StabilityConfig,
+    publish_stability,
+    run_stability,
+    validate_stability_config,
+)
 
 DEFAULT_SEED = 20240617
 AUTO = "auto"
@@ -56,6 +68,12 @@ class Config:
     replicate_metadata_path: Optional[str] = None
     detect_doublets: bool = False
     expected_doublet_rate: float = 0.08
+    # 可选聚类稳定性分析；默认关闭。启用后仅附加三个稳定性文件，
+    # 不改变默认分析路径，也不改写任何既有结果文件（含 run.json）
+    stability: bool = False
+    stability_n_resamples: int = 20
+    stability_sample_fraction: float = 0.8
+    stability_seed: int = DEFAULT_SEED
 
     @property
     def auto_clusters(self) -> bool:
@@ -149,6 +167,21 @@ def validate_config(config: Config) -> None:
             and config.batch_column == config.sample_column
         ):
             errors.append("--batch-column 与 --sample-column 不能相同")
+    if not isinstance(config.stability, bool):
+        errors.append("--stability 必须是无值开关参数")
+    if config.stability:
+        # 仅启用时校验稳定性字段；未启用时这些取值不影响任何行为，
+        # 主分析的参数校验、执行顺序与结果与基线完全一致
+        stability_config = StabilityConfig(
+            n_resamples=config.stability_n_resamples,
+            sample_fraction=config.stability_sample_fraction,
+            seed=config.stability_seed,
+        )
+        try:
+            validate_stability_config(stability_config)
+        except ValueError as exc:
+            # 对调用方保持 ValueError，命令行按配置错误（退出码 3）报告
+            raise CellFlowConfigValueError(str(exc)) from exc
     if errors:
         raise CellFlowConfigError("；".join(errors))
 
@@ -201,6 +234,13 @@ def run(config: Config) -> List[str]:
 
     n_qc_cells = len(qc.kept_cells)
     if n_qc_cells < 2:
+        # 启用稳定性分析时该终止分支对调用方表现为 ValueError（命令行仍为
+        # 数据错误退出码 4）；默认路径沿用既有 CellFlowDataError，语义不变
+        if config.stability:
+            raise CellFlowDataValueError(
+                f"质控后仅保留 {n_qc_cells} 个细胞，不足两个，无法分析"
+                f"（可用细胞数：{n_qc_cells}）"
+            )
         raise CellFlowDataError(
             f"质控后仅保留 {n_qc_cells} 个细胞，不足两个，无法分析"
         )
@@ -224,10 +264,15 @@ def run(config: Config) -> List[str]:
         )
         n_after_doublet = len(doublets.kept_cells)
         if n_after_doublet < 2:
-            raise CellFlowDataError(
+            message = (
                 f"双细胞过滤后仅保留 {n_after_doublet} 个细胞，"
                 f"不足两个，无法分析"
             )
+            if config.stability:
+                raise CellFlowDataValueError(
+                    message + f"（可用细胞数：{n_after_doublet}）"
+                )
+            raise CellFlowDataError(message)
         if not doublets.kept_genes:
             raise CellFlowDataError(
                 f"双细胞过滤后没有基因在至少 {config.min_cells} 个细胞中检出，"
@@ -616,4 +661,43 @@ def run(config: Config) -> List[str]:
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障
     # 都回滚暂存并抛 OutputPathError。
-    return publish_results(config.output_dir, artifacts)
+
+    # 可选聚类稳定性分析：结果在触碰文件系统之前全部算完，任何数据层面的
+    # ValueError（如抽样比例下样本不足两个细胞）都与其他分析阶段失败一样，
+    # 在创建或改动结果目录之前终止。抽样随机数流仅来自 stability_seed，
+    # 与主分析 seed 独立，不改变上方任何主分析中间结果与 run.json。
+    stability_result = None
+    if config.stability:
+        try:
+            stability_result = run_stability(
+                matrix,
+                analysis_qc,
+                clustering.labels,
+                n_hvg=config.n_hvg,
+                n_pcs=config.n_pcs,
+                n_clusters=config.n_clusters,
+                seed=config.seed,
+                stability=StabilityConfig(
+                    n_resamples=config.stability_n_resamples,
+                    sample_fraction=config.stability_sample_fraction,
+                    seed=config.stability_seed,
+                ),
+                batch_labels=effective_batch_labels,
+            )
+        except CellFlowError:
+            # 配置类 ValueError（已在 validate_config 拦截）保持退出码 3
+            raise
+        except ValueError as exc:
+            # 抽样后细胞不足两个、子样本 PCA/聚类无法成立等数据规模问题：
+            # 对调用方为 ValueError，命令行按数据错误（退出码 4）报告，
+            # 且此刻尚未触碰输出目录，不生成任何稳定性文件或半成品结果
+            raise CellFlowDataValueError(str(exc)) from exc
+
+    written = publish_results(config.output_dir, artifacts)
+    if stability_result is not None:
+        # 主分析已事务性发布；稳定性文件只覆盖三个同名文件，其余产物原样保留。
+        # 再次运行时同名稳定性文件被原子覆盖，不删除目录中的任何其他内容。
+        written.extend(
+            publish_stability(config.output_dir, stability_result)
+        )
+    return written
