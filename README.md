@@ -249,6 +249,57 @@ SHA-256、质控前各样体细胞数（`sample_sizes`，按输入细胞首次�
 新增文件沿用事务性发布与最短往返浮点格式，同输入同版本逐字节一致；
 目标目录问题仍由 `OutputPathError`（退出码 5）报告。
 
+### `--detect-doublets`（可选，双细胞识别与过滤）
+
+无值开关 `--detect-doublets` 启用双细胞识别；数值参数
+`--expected-doublet-rate F` 给定期望双细胞比例，只接受有限的 `[0, 1)`
+值，缺省 `0.08`。只给 `--expected-doublet-rate` 而未启用
+`--detect-doublets`、参数缺值、取值非法（含 `nan`/`inf`/区间外/非数值）、
+给无值开关传值或出现未知参数，一律报配置错误（退出码 3）。不启用时
+输入、全部结果文件与退出码与基线逐字节一致。
+
+启用后以现有 QC 候选细胞（质控通过、尚未做双细胞过滤的细胞）的原始计数
+子矩阵（全部输入基因）计算确定性 `doublet_score`：用固定 `--seed` 的
+内置随机数抽取等量候选细胞两两配对，把两个细胞的计数谱相加，再按候选
+细胞平均文库深度做无放回降采样（超几何抽样），得到“两个候选细胞计数
+叠加”的合成谱；观测谱与合成谱都按各自文库大小归一到 10000 后取
+`ln(x + 1)`。每个观测细胞在全部基因的 log 归一化空间中取最近的
+`min(15, 2*候选数-1)` 个谱（欧氏距离平方，并列按原列序、观测谱优先于
+合成谱），其中合成谱所占比例即该细胞的分数。评分区分两个候选细胞计数
+叠加谱与单细胞谱，同输入、同 seed、同参数下跨运行逐字节复现。
+
+目标标记数按 `floor(候选数 * rate)` 计算，并保证至少留一个细胞
+（rate 为 0 时不标记任何细胞）。所有候选细胞按分数降序排名，同分按原
+矩阵列序，`doublet_rank` 自 1 起；前目标数个细胞 `doublet_flag` 为真
+并被过滤。过滤后按 `--min-cells` 在最终细胞上重新计算基因保留，后续
+归一化、HVG、PCA、聚类、差异表达、批次校正、基因集评分、pseudobulk 与
+图表数据一律只使用最终细胞与最终基因；被过滤细胞在 `cells.tsv` 的
+`retained` 记为 `false`。
+
+启用时在既有结果之外新增两个文件（其余结果沿用最终细胞与基因，与不启用
+时同口径）：
+
+- `doublet_scores.tsv`：列 QC 候选细胞（原矩阵列序），表头为
+  `cell_id`、`doublet_score`、`doublet_rank`、`doublet_flag`、
+  `retained_after_doublet_filter`；`doublet_rank` 自 1 起，
+  `doublet_flag` 为是否被过滤，浮点用最短往返表示。
+- `doublet_score_chart.tsv`：把分数划分为 20 个等宽箱，列为
+  `bin_start`、`bin_end`、`cell_count`；空箱保留，边界确定
+  （分数全相同时宽度为 0，全部细胞计入首箱）。
+
+`run.json` 的 `parameters` 增加 `"detect_doublets": true` 与
+`"expected-doublet-rate"`；`stage_counts` 增加 `doublet_candidates`
+（QC 候选细胞数）、`doublets_flagged`（标记过滤数）、
+`cells_after_doublet_filter`（最终细胞数）与
+`genes_after_doublet_filter`（最终基因数）；既有 `cells_after_qc` 等
+字段仍记录双细胞过滤前的 QC 结果。QC 候选细胞或过滤后细胞少于两个、
+过滤后无保留基因报数据错误（退出码 4）。新增结果与既有结果一起事务性
+发布：目录非空、暂存或发布失败报 `OutputPathError`（退出码 5），分析
+阶段失败不创建或改动结果目录。该功能可与 `--metadata`、
+`--batch-metadata`、`--cell-metadata`、`--gene-sets`、
+`--replicate-metadata` 并用，TSV、MTX、gzip 各承载方式下等价矩阵结果
+一致。
+
 ## 约定
 
 - 公开行为以 README 与源码为准。

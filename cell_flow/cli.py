@@ -7,6 +7,7 @@
         [--batch-metadata <细胞批次.tsv>] [--gene-sets <基因集.tsv>] \\
         [--cell-metadata <细胞元数据.tsv>] [--batch-column batch] \\
         [--sample-column sample_id] [--replicate-metadata <重复元数据.tsv>] \\
+        [--detect-doublets] [--expected-doublet-rate 0.08] \\
         [--min-genes 200] [--max-mito-fraction 0.2] [--min-cells 3] \\
         [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617]
 """
@@ -26,6 +27,7 @@ USAGE = (
     "                [--batch-metadata <细胞批次.tsv>] [--gene-sets <基因集.tsv>]\n"
     "                [--cell-metadata <细胞元数据.tsv>] [--batch-column 列名]\n"
     "                [--sample-column 列名] [--replicate-metadata <重复元数据.tsv>]\n"
+    "                [--detect-doublets] [--expected-doublet-rate F]\n"
     "                [--min-genes N] [--max-mito-fraction F] [--min-cells N]\n"
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
     "                [--n-clusters N|auto] [--seed N]\n"
@@ -83,6 +85,16 @@ def _build_analyze_config(options: dict) -> Config:
     if replicate_metadata_path == "":
         # --replicate-metadata= 同上：空路径属配置错误
         raise _fail_usage("--replicate-metadata 路径为空")
+    expected_doublet_rate = 0.08
+    if options.get("expected_doublet_rate") is not None:
+        if not options.get("detect_doublets", False):
+            # 只给 --expected-doublet-rate 而未启用 --detect-doublets 属配置错误
+            raise _fail_usage(
+                "仅给出 --expected-doublet-rate 时必须同时启用 --detect-doublets"
+            )
+        expected_doublet_rate = _parse_float(
+            "--expected-doublet-rate", options["expected_doublet_rate"]
+        )
     return Config(
         input_path=options["input"],
         output_dir=options["output_dir"],
@@ -104,6 +116,8 @@ def _build_analyze_config(options: dict) -> Config:
         batch_column=options["batch_column"],
         sample_column=options["sample_column"],
         replicate_metadata_path=replicate_metadata_path,
+        detect_doublets=options.get("detect_doublets", False),
+        expected_doublet_rate=expected_doublet_rate,
     )
 
 
@@ -136,6 +150,11 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--n-pcs": "n_pcs",
         "--n-clusters": "n_clusters",
         "--seed": "seed",
+        "--expected-doublet-rate": "expected_doublet_rate",
+    }
+    # 无值开关：不接受 --flag=value 形式，出现即置真
+    flag_options = {
+        "--detect-doublets": "detect_doublets",
     }
     options = {
         "input_format": "tsv",
@@ -149,6 +168,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "seed": str(DEFAULT_SEED),
         "batch_column": DEFAULT_BATCH_COLUMN,
         "sample_column": DEFAULT_SAMPLE_COLUMN,
+        "detect_doublets": False,
     }
 
     index = 0
@@ -156,6 +176,8 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         token = argv[index]
         if token.startswith("--") and "=" in token:
             key, raw_value = token.split("=", 1)
+            if key in flag_options:
+                raise _fail_usage(f"参数 {key} 是无值开关，不接受取值")
             if key not in value_options:
                 raise _fail_usage(f"未知参数 {key}")
             options[value_options[key]] = raw_value
@@ -166,6 +188,10 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
                 raise _fail_usage(f"参数 {token} 缺少取值")
             options[value_options[token]] = argv[index + 1]
             index += 2
+            continue
+        if token in flag_options:
+            options[flag_options[token]] = True
+            index += 1
             continue
         raise _fail_usage(f"无法识别的参数或多余位置参数：{token}")
 

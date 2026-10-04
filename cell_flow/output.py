@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .errors import OutputPathError
 from .batch import BatchSummaryRow
 from .cell_metadata import CellBatchReport
+from .doublets import DoubletResult
 from .gene_sets import GeneSetScores
 from .kmeans import KMeansResult
 from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
@@ -63,6 +64,7 @@ class Artifacts:
     gene_set_scores: Optional[GeneSetScores] = None
     cell_batch_report: Optional[CellBatchReport] = None
     pseudobulk: Optional[PseudobulkData] = None
+    doublet: Optional[DoubletResult] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -640,6 +642,44 @@ def _batch_mixing_tsv(report: CellBatchReport) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _doublet_scores_tsv(doublet: DoubletResult) -> str:
+    """QC 候选细胞原序：分数、排名、是否标记与过滤后是否保留。"""
+    lines = [
+        tsv_row(
+            [
+                "cell_id",
+                "doublet_score",
+                "doublet_rank",
+                "doublet_flag",
+                "retained_after_doublet_filter",
+            ]
+        )
+    ]
+    for i, cell_id in enumerate(doublet.cell_ids):
+        lines.append(
+            tsv_row(
+                [
+                    cell_id,
+                    fmt_float(doublet.scores[i]),
+                    doublet.ranks[i],
+                    fmt_bool(doublet.flagged[i]),
+                    fmt_bool(doublet.retained[i]),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _doublet_score_chart_tsv(doublet: DoubletResult) -> str:
+    """分数的 20 个等宽箱；空箱保留，边界确定。"""
+    lines = [tsv_row(["bin_start", "bin_end", "cell_count"])]
+    for start, end, count in doublet.bins:
+        lines.append(
+            tsv_row([fmt_float(start), fmt_float(end), count])
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
@@ -758,6 +798,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         final_names.append("pseudobulk_expression.tsv")
         final_names.append("pseudobulk_group_markers.tsv")
         final_names.append("pseudobulk_marker_chart.tsv")
+    if artifacts.doublet is not None:
+        # 仅 --detect-doublets 运行产出双细胞结果；未启用时文件集与基线一致
+        final_names.append("doublet_scores.tsv")
+        final_names.append("doublet_score_chart.tsv")
     final_names.append("run.json")
 
     payload: List[Tuple[str, str]] = [
@@ -868,6 +912,16 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             (
                 "pseudobulk_marker_chart.tsv",
                 _group_marker_chart_tsv(artifacts.pseudobulk.comparisons),
+            )
+        )
+    if artifacts.doublet is not None:
+        payload.append(
+            ("doublet_scores.tsv", _doublet_scores_tsv(artifacts.doublet))
+        )
+        payload.append(
+            (
+                "doublet_score_chart.tsv",
+                _doublet_score_chart_tsv(artifacts.doublet),
             )
         )
     payload.append(("run.json", _run_json(artifacts.run_info)))

@@ -1,5 +1,6 @@
 """分析管线编排：参数校验 -> 读入 -> QC -> 归一化/HVG -> PCA -> 聚类 -> 差异表达 -> 写出。"""
 
+import math
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Union
 
@@ -12,6 +13,7 @@ from .cell_metadata import (
     batch_mixing_score,
     read_cell_metadata,
 )
+from .doublets import DoubletResult, apply_doublet_filter, score_doublets
 from .errors import CellFlowConfigError, CellFlowDataError
 from .gene_sets import read_gene_sets, score_gene_sets
 from .io import ExpressionMatrix, read_matrix
@@ -53,6 +55,8 @@ class Config:
     batch_column: str = DEFAULT_BATCH_COLUMN
     sample_column: str = DEFAULT_SAMPLE_COLUMN
     replicate_metadata_path: Optional[str] = None
+    detect_doublets: bool = False
+    expected_doublet_rate: float = 0.08
 
     @property
     def auto_clusters(self) -> bool:
@@ -82,6 +86,10 @@ class Config:
         if self.replicate_metadata_path is not None:
             # 仅 pseudobulk 运行记录该参数；未提供时 parameters 与基线一致
             parameters["pseudobulk_de"] = True
+        if self.detect_doublets:
+            # 仅启用双细胞识别时记录；未启用时 parameters 与基线逐字节一致
+            parameters["detect_doublets"] = True
+            parameters["expected-doublet-rate"] = self.expected_doublet_rate
         return parameters
 
 
@@ -113,6 +121,16 @@ def validate_config(config: Config) -> None:
             errors.append("--n-clusters 必须是 >= 2 的整数")
     if not isinstance(config.seed, int) or isinstance(config.seed, bool):
         errors.append("--seed 必须是整数")
+    if not isinstance(config.detect_doublets, bool):
+        errors.append("--detect-doublets 必须是无值开关")
+    rate = config.expected_doublet_rate
+    if (
+        not isinstance(rate, (int, float))
+        or isinstance(rate, bool)
+        or not math.isfinite(float(rate))
+        or not 0.0 <= float(rate) < 1.0
+    ):
+        errors.append("--expected-doublet-rate 必须是有限的 [0, 1) 内数值")
     if config.input_format not in INPUT_FORMATS:
         errors.append("--input-format 只能是 tsv 或 mtx")
     if config.cell_metadata_path is not None:
@@ -193,6 +211,39 @@ def run(config: Config) -> List[str]:
         raise CellFlowDataError(
             f"没有基因在至少 {config.min_cells} 个细胞中检出，无可用基因"
         )
+
+    # 可选双细胞识别与过滤：在 QC 候选细胞的原始计数子矩阵上确定性评分，
+    # 过滤后按 min_cells 重算基因，后续阶段一律只使用最终细胞与基因。
+    doublet: Optional[DoubletResult] = None
+    n_doublet_candidates = 0
+    n_doublets_flagged = 0
+    n_cells_after_qc = n_kept_cells
+    n_genes_after_qc = len(qc.kept_genes)
+    if config.detect_doublets:
+        n_doublet_candidates = n_kept_cells
+        try:
+            doublet = score_doublets(
+                matrix,
+                qc.kept_cells,
+                config.expected_doublet_rate,
+                config.seed,
+            )
+        except ValueError as exc:
+            raise CellFlowDataError(f"双细胞识别无法成立：{exc}") from exc
+        n_doublets_flagged = sum(1 for value in doublet.flagged if value)
+        qc = apply_doublet_filter(
+            matrix, qc, doublet, min_cells=config.min_cells
+        )
+        n_kept_cells = len(qc.kept_cells)
+        if n_kept_cells < 2:
+            raise CellFlowDataError(
+                f"双细胞过滤后仅保留 {n_kept_cells} 个细胞，不足两个，无法分析"
+            )
+        if not qc.kept_genes:
+            raise CellFlowDataError(
+                f"双细胞过滤后没有基因在至少 {config.min_cells} 个细胞中检出，"
+                f"无可用基因"
+            )
 
     if metadata is not None:
         kept_groups = {
@@ -496,10 +547,10 @@ def run(config: Config) -> List[str]:
         "stage_counts": {
             "input_cells": matrix.n_cells,
             "input_genes": matrix.n_genes,
-            "cells_after_qc": n_kept_cells,
-            "genes_after_qc": len(qc.kept_genes),
-            "cells_filtered_out": matrix.n_cells - n_kept_cells,
-            "genes_filtered_out": matrix.n_genes - len(qc.kept_genes),
+            "cells_after_qc": n_cells_after_qc,
+            "genes_after_qc": n_genes_after_qc,
+            "cells_filtered_out": matrix.n_cells - n_cells_after_qc,
+            "genes_filtered_out": matrix.n_genes - n_genes_after_qc,
             "highly_variable_genes": len(normalized.selected_genes),
             "max_pcs_parameter": MAX_PCS,
             "pcs": pca.n_pcs,
@@ -514,6 +565,13 @@ def run(config: Config) -> List[str]:
         },
         "random_seed": config.seed,
     }
+    if doublet is not None:
+        # 双细胞识别运行记录候选、标记与过滤后最终细胞/基因数；
+        # 未启用时 stage_counts 与基线逐字节一致
+        run_info["stage_counts"]["doublet_candidates"] = n_doublet_candidates
+        run_info["stage_counts"]["doublets_flagged"] = n_doublets_flagged
+        run_info["stage_counts"]["cells_after_doublet_filter"] = n_kept_cells
+        run_info["stage_counts"]["genes_after_doublet_filter"] = len(qc.kept_genes)
     if pseudobulk is not None:
         # pseudobulk 运行记录样本/分组数与检验计数；未提供重复元数据时字段不变
         n_pseudobulk_genes = len(pseudobulk.gene_ids)
@@ -554,6 +612,7 @@ def run(config: Config) -> List[str]:
         gene_set_scores=gene_set_scores,
         cell_batch_report=cell_batch_report,
         pseudobulk=pseudobulk,
+        doublet=doublet,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障
