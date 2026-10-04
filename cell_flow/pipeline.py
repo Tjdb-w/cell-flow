@@ -13,7 +13,7 @@ from .cell_metadata import (
     read_cell_metadata,
 )
 from .doublets import DoubletResult, detect_doublets
-from .errors import CellFlowConfigError, CellFlowDataError
+from .errors import CellFlowConfigError, CellFlowDataError, CellFlowError
 from .gene_sets import read_gene_sets, score_gene_sets
 from .io import ExpressionMatrix, read_matrix
 from .kmeans import kmeans
@@ -26,6 +26,16 @@ from .pca import MAX_PCS, run_pca
 from .qc import compute_qc
 from .replicate import PseudobulkData, build_pseudobulk, read_replicate_metadata
 from .selection import select_cluster_count
+from .stability import (
+    DEFAULT_STABILITY_FRACTION,
+    DEFAULT_STABILITY_SAMPLES,
+    DEFAULT_STABILITY_SEED,
+    StabilityConfig,
+    StabilityResult,
+    run_stability_analysis,
+    summarize_scores,
+    validate_stability_settings,
+)
 
 DEFAULT_SEED = 20240617
 AUTO = "auto"
@@ -56,6 +66,10 @@ class Config:
     replicate_metadata_path: Optional[str] = None
     detect_doublets: bool = False
     expected_doublet_rate: float = 0.08
+    stability_analysis: bool = False
+    stability_n_samples: Any = DEFAULT_STABILITY_SAMPLES
+    stability_sample_fraction: Any = DEFAULT_STABILITY_FRACTION
+    stability_seed: Any = DEFAULT_STABILITY_SEED
 
     @property
     def auto_clusters(self) -> bool:
@@ -89,6 +103,12 @@ class Config:
             # 仅双细胞识别运行记录这两个参数；未启用时 parameters 与基线一致
             parameters["detect_doublets"] = True
             parameters["expected-doublet-rate"] = self.expected_doublet_rate
+        if self.stability_analysis:
+            # 仅显式启用稳定性分析时记录这三个参数；未启用时与基线逐字节一致
+            parameters["stability_analysis"] = True
+            parameters["stability_n_samples"] = self.stability_n_samples
+            parameters["stability_sample_fraction"] = self.stability_sample_fraction
+            parameters["stability_seed"] = self.stability_seed
         return parameters
 
 
@@ -155,6 +175,16 @@ def validate_config(config: Config) -> None:
 
 def run(config: Config) -> List[str]:
     validate_config(config)
+
+    # 稳定性分析参数非法时统一以 ValueError 失败并指出对应配置字段；
+    # 在读入矩阵与触碰输出目录之前终止，不生成任何稳定性文件
+    stability_config: Optional[StabilityConfig] = None
+    if config.stability_analysis:
+        stability_config = validate_stability_settings(
+            n_samples=config.stability_n_samples,
+            sample_fraction=config.stability_sample_fraction,
+            seed=config.stability_seed,
+        )
 
     # 先完成读入与全部计算，最后再触碰输出目录：
     # 任何分析阶段失败都不应留下空目录或半成品结果
@@ -327,6 +357,36 @@ def run(config: Config) -> List[str]:
                 f"但数据仅能支撑 {n_found_clusters} 个不同簇（方差不足）"
             )
         selection = None
+
+    # 可选聚类稳定性分析：以完整数据的本次聚类标签为参照，对最终保留细胞
+    # （analysis_qc.kept_cells，与 clustering.labels 列序一致）不放回抽样，
+    # 每次沿用同一 QC/归一化/HVG/PCA/聚类配置重算标签并在交集上求 ARI。
+    # 抽样随机流只来自独立的 stability_seed，不触碰主分析的任何中间结果；
+    # 未启用时 stability_result 为 None，主分析路径与结果与基线逐字节一致。
+    stability_result: Optional[StabilityResult] = None
+    if stability_config is not None:
+        try:
+            stability_result = run_stability_analysis(
+                matrix,
+                analysis_qc,
+                config=stability_config,
+                min_genes=config.min_genes,
+                max_mito_fraction=config.max_mito_fraction,
+                min_cells=config.min_cells,
+                mito_prefix=config.mito_prefix,
+                n_hvg=config.n_hvg,
+                n_pcs=config.n_pcs,
+                n_clusters=config.n_clusters,
+                seed=config.seed,
+                batch_labels=effective_batch_labels,
+                reference_labels=clustering.labels,
+            )
+        except CellFlowError:
+            # 配置/数据错误已带确定退出码，直接向上传播
+            raise
+        except ValueError as exc:
+            # 抽样子集 PCA/聚类无法成立等意外情形，统一按数据错误（退出码 4）报告
+            raise CellFlowDataError(f"聚类稳定性分析无法成立：{exc}") from exc
 
     # 跨样本批次校正运行始终公开校正后表达：多批次为均值中心化值，
     # 单批次为与未校正值逐字节一致的拷贝（校正即恒等，不引入扰动）
@@ -596,6 +656,20 @@ def run(config: Config) -> List[str]:
             "mixing_score_before": cell_batch_report.mixing_before,
             "mixing_score_after": cell_batch_report.mixing_after,
         }
+    if stability_result is not None:
+        # 聚类稳定性汇总：仅显式启用时出现；既有字段不变
+        stats = summarize_scores(stability_result.scores)
+        run_info["stability_analysis"] = {
+            "n_samples": stability_result.config.n_samples,
+            "sample_fraction": stability_result.config.sample_fraction,
+            "seed": stability_result.config.seed,
+            "n_available_cells": stability_result.n_available_cells,
+            "sample_size": stability_result.sample_sizes[0],
+            "mean_adjusted_rand_index": stats["mean"],
+            "median_adjusted_rand_index": stats["median"],
+            "min_adjusted_rand_index": stats["min"],
+            "max_adjusted_rand_index": stats["max"],
+        }
 
     artifacts = Artifacts(
         qc=qc,
@@ -612,6 +686,7 @@ def run(config: Config) -> List[str]:
         cell_batch_report=cell_batch_report,
         pseudobulk=pseudobulk,
         doublets=doublets,
+        stability=stability_result,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

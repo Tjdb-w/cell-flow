@@ -24,8 +24,23 @@ class CellFlowConfigError(CellFlowError):
     exit_code = 3
 
 
-class CellFlowDataError(CellFlowError):
-    """数据无法支撑分析（质控后细胞不足、无可用基因、PCA/聚类无法成立）。"""
+class CellFlowStabilityConfigError(CellFlowConfigError, ValueError):
+    """可选稳定性分析的参数非法（抽样次数、抽样比例、随机种子）。
+
+    同时是 :class:`ValueError`：需求规定这些非法配置一律以 ValueError 终止
+    并指出对应配置字段；命令行仍按配置错误以退出码 3 报告。
+    """
+
+    exit_code = 3
+
+
+class CellFlowDataError(CellFlowError, ValueError):
+    """数据无法支撑分析（质控后细胞不足、无可用基因、PCA/聚类无法成立）。
+
+    同时是 :class:`ValueError`：与输入错误一致，数据层面的冲突对库调用方
+    统一表现为 ValueError（消息中给出可用细胞数等具体规模），命令行退出码
+    仍保持 4（``CellFlowError`` 在命令行处先被捕获）。
+    """
 
     exit_code = 4
 

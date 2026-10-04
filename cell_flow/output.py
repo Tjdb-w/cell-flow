@@ -31,6 +31,12 @@ from .pca import PCAResult
 from .qc import QCResult
 from .replicate import PseudobulkData
 from .selection import ClusterSelectionResult
+from .stability import (
+    STABILITY_FILE_DISTRIBUTION,
+    STABILITY_FILE_SCORES,
+    STABILITY_FILE_SUMMARY,
+    StabilityResult,
+)
 
 TOP_N_MARKERS = 20
 HIST_BINS = 20
@@ -65,6 +71,7 @@ class Artifacts:
     cell_batch_report: Optional[CellBatchReport] = None
     pseudobulk: Optional[PseudobulkData] = None
     doublets: Optional[DoubletResult] = None
+    stability: Optional[StabilityResult] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -701,6 +708,87 @@ def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
 
+def _stability_scores_csv(result: StabilityResult) -> str:
+    """逐次抽样的稳定性分数 CSV：一行一次抽样，按抽样次序排列。"""
+    lines = ["sample,n_sampled_cells,n_intersection_cells,adjusted_rand_index"]
+    for i in range(result.n_samples):
+        lines.append(
+            ",".join(
+                [
+                    str(i + 1),
+                    str(result.sample_sizes[i]),
+                    str(result.intersection_sizes[i]),
+                    fmt_float(result.scores[i]),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _stability_summary_json(result: StabilityResult) -> str:
+    """summary.json：抽样次数、抽样比例、随机种子与均值/中位数/最小/最大值。"""
+    from .stability import summarize_scores
+
+    stats = summarize_scores(result.scores)
+    payload = {
+        "n_samples": result.config.n_samples,
+        "sample_fraction": result.config.sample_fraction,
+        "seed": result.config.seed,
+        "n_available_cells": result.n_available_cells,
+        "sample_size": result.sample_sizes[0],
+        "mean": stats["mean"],
+        "median": stats["median"],
+        "min": stats["min"],
+        "max": stats["max"],
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+
+def _stability_distribution_json(result: StabilityResult) -> str:
+    """供绘图使用的分数分布数据：逐次分数序列与 20 个等宽箱。
+
+    箱边界由分数最小/最大值确定（与既有等宽直方图口径一致），空箱保留。
+    """
+    scores = result.scores
+    lo = min(scores)
+    hi = max(scores)
+    width = (hi - lo) / HIST_BINS
+    counts = [0] * HIST_BINS
+    for value in scores:
+        if width <= 0.0:
+            idx = 0
+        else:
+            idx = int((value - lo) / width)
+            if idx < 0:
+                idx = 0
+            elif idx >= HIST_BINS:
+                idx = HIST_BINS - 1
+        counts[idx] += 1
+    bins = []
+    for b in range(HIST_BINS):
+        start = lo + b * width
+        end = lo + (b + 1) * width if width > 0.0 else hi
+        bins.append(
+            {
+                "bin_index": b,
+                "bin_start": float(start),
+                "bin_end": float(end),
+                "count": counts[b],
+            }
+        )
+    payload = {
+        "metric": "adjusted_rand_index",
+        "n_samples": result.config.n_samples,
+        "sample_fraction": result.config.sample_fraction,
+        "seed": result.config.seed,
+        "n_available_cells": result.n_available_cells,
+        "sample_size": result.sample_sizes[0],
+        "scores": [float(value) for value in scores],
+        "bins": bins,
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+
 def _cluster_selection_tsv(selection: ClusterSelectionResult) -> str:
     # 候选按 k 升序；布尔 true/false；浮点最短往返；无效行两项指标 nan
     lines = [
@@ -764,13 +852,126 @@ def _remove_stage(stage_dir: str) -> None:
     shutil.rmtree(stage_dir, ignore_errors=True)
 
 
+def _write_staging_payload(
+    stage_dir: str, payload: List[Tuple[str, str]]
+) -> None:
+    """把全部文件内容写入暂存目录；失败统一抛 :class:`OutputPathError`。"""
+    for name, content in payload:
+        stage_path = os.path.join(stage_dir, name)
+        fd = None
+        try:
+            fd = os.open(stage_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                fd = None
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            raise OutputPathError(
+                f"结果文件写出失败：{name}（{exc}）"
+            ) from exc
+
+
+def _is_existing_result_dir(output_dir: str) -> bool:
+    """目标是否为一个已发布的分析目录（普通目录且含 run.json 完整性标志）。"""
+    if not os.path.lexists(output_dir):
+        return False
+    if not os.path.isdir(output_dir) or os.path.islink(output_dir):
+        return False
+    return os.path.isfile(os.path.join(output_dir, "run.json"))
+
+
+def _publish_stability_overlay(
+    output_dir: str,
+    stability_payload: List[Tuple[str, str]],
+    run_info: Dict[str, Any],
+) -> List[str]:
+    """向已有分析目录增量发布稳定性结果。
+
+    仅覆盖三个稳定性文件与 run.json，目录中的其他产物原样保留、字节不动。
+    每个文件先在目标目录内写隐藏临时文件并刷盘，再以一次 ``os.replace``
+    原子改名覆盖同名文件；run.json 最后替换。任一文件失败都清理本函数产生
+    的临时文件并抛 :class:`OutputPathError`，已存在的其他文件不受影响。
+    """
+    overlay = list(stability_payload) + [("run.json", _run_json(run_info))]
+    written: List[Tuple[str, str]] = []
+    temp_paths: List[str] = []
+    try:
+        for name, content in overlay:
+            fd = None
+            tmp_path = None
+            try:
+                fd, tmp_path = tempfile.mkstemp(prefix=f"..{name}.", dir=output_dir)
+                with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                    fd = None
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except OSError as exc:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                raise OutputPathError(
+                    f"稳定性结果文件写出失败：{name}（{exc}）"
+                ) from exc
+            temp_paths.append(tmp_path)
+            written.append((name, tmp_path))
+
+        for name, tmp_path in written:
+            try:
+                os.replace(tmp_path, os.path.join(output_dir, name))
+            except OSError as exc:
+                raise OutputPathError(
+                    f"稳定性结果文件发布失败：{name}（{exc}）"
+                ) from exc
+            # 已发布：该临时路径即目标路径，不得再清理
+            temp_paths[temp_paths.index(tmp_path)] = ""
+    finally:
+        for tmp_path in temp_paths:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+    return [name for name, _ in overlay]
+
+
 def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
     """事务性发布全部结果，返回文件名列表（run.json 在最后）。
 
-    全部文件先落到父目录下的一个同级隐藏暂存目录，随后一次 ``os.replace``
-    原子改名为目标目录。任何创建、写入、刷盘、改名或最终发布失败都清理暂存
-    目录并抛 :class:`OutputPathError`，目标路径回到调用前状态。
+    全新运行：全部文件先落到父目录下的一个同级隐藏暂存目录，随后一次
+    ``os.replace`` 原子改名为目标目录。任何创建、写入、刷盘、改名或最终
+    发布失败都清理暂存目录并抛 :class:`OutputPathError`，目标路径回到
+    调用前状态。
+
+    稳定性结果重跑（目标目录已存在且含 run.json，且本次启用稳定性分析）：
+    不再重建主分析，而是增量覆盖三个稳定性文件与 run.json，目录中的其他
+    分析产物原样保留。
     """
+    stability_enabled = artifacts.stability is not None
+    if stability_enabled and _is_existing_result_dir(output_dir):
+        stability_payload = [
+            (STABILITY_FILE_SCORES, _stability_scores_csv(artifacts.stability)),
+            (
+                STABILITY_FILE_SUMMARY,
+                _stability_summary_json(artifacts.stability),
+            ),
+            (
+                STABILITY_FILE_DISTRIBUTION,
+                _stability_distribution_json(artifacts.stability),
+            ),
+        ]
+        return _publish_stability_overlay(
+            output_dir, stability_payload, artifacts.run_info
+        )
+
     _validate_target(output_dir)
 
     parent = os.path.dirname(os.path.abspath(output_dir))
@@ -819,6 +1020,24 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         # 仅 --detect-doublets 运行产出双细胞评分产物；未启用时文件集不变
         final_names.append("doublet_scores.tsv")
         final_names.append("doublet_score_chart.tsv")
+    stability_payload: List[Tuple[str, str]] = []
+    if artifacts.stability is not None:
+        # 仅 --stability-analysis 运行产出三个稳定性文件；未启用时文件集不变
+        stability_payload = [
+            (
+                STABILITY_FILE_SCORES,
+                _stability_scores_csv(artifacts.stability),
+            ),
+            (
+                STABILITY_FILE_SUMMARY,
+                _stability_summary_json(artifacts.stability),
+            ),
+            (
+                STABILITY_FILE_DISTRIBUTION,
+                _stability_distribution_json(artifacts.stability),
+            ),
+        ]
+        final_names.extend(name for name, _ in stability_payload)
     final_names.append("run.json")
 
     payload: List[Tuple[str, str]] = [
@@ -941,6 +1160,7 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                 _doublet_score_chart_tsv(artifacts.doublets),
             )
         )
+    payload.extend(stability_payload)
     payload.append(("run.json", _run_json(artifacts.run_info)))
 
     stage_dir: Optional[str] = None
@@ -956,25 +1176,7 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         except OSError as exc:
             raise OutputPathError(f"结果暂存目录创建失败：{exc}") from exc
 
-        for name, content in payload:
-            stage_path = os.path.join(stage_dir, name)
-            fd = None
-            try:
-                fd = os.open(stage_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-                with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                    fd = None
-                    handle.write(content)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            except OSError as exc:
-                if fd is not None:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
-                raise OutputPathError(
-                    f"结果文件写出失败：{name}（{exc}）"
-                ) from exc
+        _write_staging_payload(stage_dir, payload)
 
         try:
             os.replace(stage_dir, os.path.abspath(output_dir))

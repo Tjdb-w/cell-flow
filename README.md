@@ -280,6 +280,64 @@ rate 为 0 不标记，且任何情况下至少保留一个细胞。过滤后按
 `genes_after_doublet_filter`、`final_cells` 与 `final_genes`。
 其余字段不变；未启用时输入、结果与退出码与基线完全一致。
 
+### `--stability-analysis`（可选，聚类稳定性分析）
+
+`--stability-analysis` 是无值开关；仅当显式启用时才执行附加计算，未启用时
+主分析的输出内容、文件位置与默认执行顺序与当前基线逐字节一致。配套三个
+取值参数，只在开关启用时有效（`--key value` 与 `--key=value` 均可）：
+
+- `--stability-n-samples`：抽样次数，整数且 `>= 2`，缺省 `100`。
+- `--stability-sample-fraction`：抽样比例，`(0, 1)` 开区间内的有限数值，
+  缺省 `0.8`。比例是每次参与分析的细胞占**通过质量控制细胞数**（启用
+  `--detect-doublets` 时为双细胞过滤后的最终细胞数）的比例；每次抽样规模
+  为 `floor(比例 × 可用细胞数)`，抽样不放回。
+- `--stability-seed`：抽样随机种子，整数，缺省 `20240617`。
+
+只给上述任一取值参数而不给 `--stability-analysis`、取值缺值或非法
+（非整数、非数值、非有限、越界），一律报配置错误（退出码 3）。
+抽样次数小于二、抽样比例不在零到一之间、随机种子不是整数，在库调用层
+统一以 `ValueError` 终止并指出对应配置字段；输入矩阵缺少细胞标识或特征
+标识、矩阵为空，沿用既有输入错误（退出码 2，亦为 `ValueError`）；
+通过质量控制后少于两个细胞、或抽样规模不足以重新聚类，报数据错误
+（退出码 4，亦为 `ValueError`），消息说明可用细胞数。任何失败都在触碰
+输出目录之前终止，不生成任何稳定性文件或半成品。
+
+分析以**完整数据的一次降维聚类结果作为参照**，随后逐次抽样：每次对通过
+质控的细胞做不放回随机抽样，在抽样子矩阵上沿用与主分析完全相同的
+质量控制、`--min-cells` 基因保留、log 归一化、高变基因选择、PCA、聚类
+配置（固定 `--n-clusters` 用同一 k，`auto` 用同一自动选择流程；有批次
+校正时沿用同一批次均值中心化）生成标签，聚类随机仍只来自主分析
+`--seed`，抽样随机只来自 `--stability-seed`，两者相互独立。每次只在
+抽样细胞与参照标签都存在的交集上计算调整兰德指数（Adjusted Rand Index）。
+
+启用时在既有结果之外新增三个文件（未启用时文件集与基线一致）：
+
+- `stability_scores.csv`：逐次稳定性分数，表头
+  `sample,n_sampled_cells,n_intersection_cells,adjusted_rand_index`，
+  一行一次抽样，按抽样次序排列，浮点最短往返。
+- `summary.json`：含 `n_samples`、`sample_fraction`、`seed`（以及
+  `n_available_cells`、`sample_size`）与 `mean`、`median`、`min`、`max`。
+- `stability_score_distribution.json`：供绘图使用的分数分布数据，含
+  逐次 `scores` 序列与 20 个等宽箱（边界由分数最小/最大值确定，空箱保留）。
+
+`run.json` 的 `parameters` 增加 `"stability_analysis": true` 与三个稳定性
+参数；新增顶层 `stability_analysis` 记录抽样次数、比例、种子、可用细胞数、
+每次抽样规模与均值/中位数/最小/最大调整兰德指数；既有字段不变。
+
+输出目录中已有的其他分析产物必须保留：若目标目录已是含 `run.json` 的
+既有结果目录且本次启用稳定性分析，则增量覆盖上述三个稳定性文件与
+`run.json`（各自先写隐藏临时文件再原子改名，run.json 最后替换），
+其余文件原样保留、字节不动；全新目录仍随主分析事务性一次性发布。
+本次稳定性分析生成的同名文件在再次运行时被覆盖。目录非普通目录、
+父目录不存在或暂存、写出、发布失败仍报 `OutputPathError`（退出码 5）。
+
+相同输入、配置与随机种子重复执行时，逐次抽样选择、稳定性分数、
+`summary.json` 与图表数据完全一致；改变 `--stability-seed` 只改变抽样
+选择与稳定性统计，绝不改变完整数据主分析的降维坐标、聚类标签或差异
+表达结果。该分析可与 `--metadata`、`--batch-metadata`、`--cell-metadata`、
+`--gene-sets`、`--replicate-metadata`、`--detect-doublets` 并用；
+TSV、MTX、gzip 各输入承载方式下等价矩阵的结果一致性保持不变。
+
 ## 约定
 
 - 公开行为以 README 与源码为准。

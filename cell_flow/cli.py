@@ -9,7 +9,9 @@
         [--sample-column sample_id] [--replicate-metadata <重复元数据.tsv>] \\
         [--min-genes 200] [--max-mito-fraction 0.2] [--min-cells 3] \\
         [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617] \\
-        [--detect-doublets] [--expected-doublet-rate 0.08]
+        [--detect-doublets] [--expected-doublet-rate 0.08] \\
+        [--stability-analysis] [--stability-n-samples 100] \\
+        [--stability-sample-fraction 0.8] [--stability-seed 20240617]
 """
 
 import sys
@@ -20,6 +22,11 @@ from .cell_metadata import DEFAULT_BATCH_COLUMN, DEFAULT_SAMPLE_COLUMN
 from .errors import CellFlowError
 from .pca import MAX_PCS
 from .pipeline import DEFAULT_SEED, Config, INPUT_FORMATS, run
+from .stability import (
+    DEFAULT_STABILITY_FRACTION,
+    DEFAULT_STABILITY_SAMPLES,
+    DEFAULT_STABILITY_SEED,
+)
 
 USAGE = (
     "用法：cell-flow analyze --input <表达矩阵.tsv|mtx目录> --output-dir <结果目录>\n"
@@ -31,6 +38,8 @@ USAGE = (
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
     "                [--n-clusters N|auto] [--seed N]\n"
     "                [--detect-doublets] [--expected-doublet-rate F]\n"
+    "                [--stability-analysis] [--stability-n-samples N]\n"
+    "                [--stability-sample-fraction F] [--stability-seed N]\n"
     "      cell-flow --version"
 )
 
@@ -110,6 +119,16 @@ def _build_analyze_config(options: dict) -> Config:
         expected_doublet_rate=_parse_float(
             "--expected-doublet-rate", options["expected_doublet_rate"]
         ),
+        stability_analysis=bool(options.get("stability_analysis")),
+        stability_n_samples=_parse_int(
+            "--stability-n-samples", options["stability_n_samples"]
+        ),
+        stability_sample_fraction=_parse_float(
+            "--stability-sample-fraction", options["stability_sample_fraction"]
+        ),
+        stability_seed=_parse_int(
+            "--stability-seed", options["stability_seed"]
+        ),
     )
 
 
@@ -143,10 +162,14 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--n-clusters": "n_clusters",
         "--seed": "seed",
         "--expected-doublet-rate": "expected_doublet_rate",
+        "--stability-n-samples": "stability_n_samples",
+        "--stability-sample-fraction": "stability_sample_fraction",
+        "--stability-seed": "stability_seed",
     }
     # 无值开关参数；--detect-doublets=x 形式按未知参数拒绝
     flag_options = {
         "--detect-doublets": "detect_doublets",
+        "--stability-analysis": "stability_analysis",
     }
     options = {
         "input_format": "tsv",
@@ -161,6 +184,9 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "batch_column": DEFAULT_BATCH_COLUMN,
         "sample_column": DEFAULT_SAMPLE_COLUMN,
         "expected_doublet_rate": "0.08",
+        "stability_n_samples": str(DEFAULT_STABILITY_SAMPLES),
+        "stability_sample_fraction": str(DEFAULT_STABILITY_FRACTION),
+        "stability_seed": str(DEFAULT_STABILITY_SEED),
     }
 
     explicit = set()
@@ -191,6 +217,20 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
     if "expected_doublet_rate" in explicit and not options.get("detect_doublets"):
         # 只给 --expected-doublet-rate 而不启用双细胞识别属配置错误
         raise _fail_usage("--expected-doublet-rate 需与 --detect-doublets 同时使用")
+
+    stability_param_keys = (
+        "stability_n_samples",
+        "stability_sample_fraction",
+        "stability_seed",
+    )
+    if any(key in explicit for key in stability_param_keys) and not options.get(
+        "stability_analysis"
+    ):
+        # 只给稳定性参数而不启用 --stability-analysis 属配置错误
+        raise _fail_usage(
+            "--stability-n-samples/--stability-sample-fraction/--stability-seed "
+            "需与 --stability-analysis 同时使用"
+        )
 
     return _build_analyze_config(options)
 
