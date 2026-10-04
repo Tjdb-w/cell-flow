@@ -13,9 +13,9 @@
 ## 输入
 
 入口仍为 `cell-flow analyze --input <路径> --output-dir <结果目录>`，
-新增可选 `--input-format`（取值 `tsv` 或 `mtx`，默认 `tsv`）与
-`--gene-sets`。`--key value` 与 `--key=value` 两种写法均支持。
-跨样本批次校正见下文 `--cell-metadata`。
+新增可选 `--input-format`（取值 `tsv` 或 `mtx`，默认 `tsv`）、
+`--gene-sets` 与 `--replicate-metadata`。`--key value` 与 `--key=value`
+两种写法均支持。跨样本批次校正见下文 `--cell-metadata`。
 
 ### `tsv`（默认，UTF-8 制表符基因计数矩阵）
 
@@ -202,6 +202,52 @@ UTF-8 制表符文本，表头恰为 `set_id`、`gene_id` 两列；每行一个
 既有字段不变。未提供 `--gene-sets` 时全部行为与基线逐字节一致。
 浮点格式沿用既有结果口径（最短往返表示），重复运行逐字节一致；目标非空
 或暂存、写出、发布失败报 `OutputPathError`（退出码 5）。
+
+### `--replicate-metadata`（可选，按生物学重复的 pseudobulk 差异表达）
+
+`--replicate-metadata <路径>`（`--key value` 与 `--key=value` 均可）指向
+一个 UTF-8 制表符文本，表头恰为 `cell_id`、`sample_id`、`group` 三列；
+每个输入细胞恰好一行，`cell_id` 唯一且与表达矩阵的全部细胞一一对应
+（不多不少），`sample_id` 与 `group` 非空，同一 `sample_id` 只能归属一个
+`group`。文件可为纯文本或单成员 gzip（按 gzip 魔数识别，与文件名无关）。
+表头不符、行列数不一致、ID 重复、覆盖不全或含矩阵之外的细胞、空样本或空
+分组、同一样本归属多个分组，或 gzip 多成员、尾随数据、截断、CRC/长度错误，
+一律报输入错误（退出码 2）且不改动结果目录；`--replicate-metadata` 缺值、
+空路径或出现未知参数报配置错误（退出码 3）。质控后某样本无保留细胞、某
+group 有效重复少于两个或非空 group 不足两个报数据错误（退出码 4）。
+
+分析只用既有质控保留的细胞与基因，输入、QC、聚类、批次校正、基因集评分与
+其余图表行为均不变；未提供该参数时，全部结果与当前版本逐字节一致。
+pseudobulk 按 `sample_id` 对**原始计数**求和形成，样本文库归一到 10000 后
+取 log1p；样本文库总计数按该样本在保留基因上的计数和计算。差异表达以样本
+为观测单位：每个 group 先做 one-vs-rest，再按 group 升序两两比较，
+执行 Welch t 检验、双侧 P 值，并在每个比较内跨基因做 BH 校正。提供该参数
+时在既有结果之外新增三个文件：
+
+- `pseudobulk_expression.tsv`：保留基因（沿用保留顺序）× 样本的 pseudobulk
+  log 归一化表达；样本按其输入细胞在矩阵列序中的首次出现排列，质控后无保留
+  细胞的样本不出现。
+- `pseudobulk_group_markers.tsv`：前三列为 `comparison_type`、`group_a`、
+  `group_b`（one-vs-rest 的 `group_b` 为空），其余列沿用现有 group marker
+  统计列：`gene_id`、`mean_in_a`、`mean_in_b`、`log_fc_a_vs_b`（均值差）、
+  `t_stat`、`p_value`、`p_value_adj`。每个比较内按校正 P 值升序、
+  `log_fc_a_vs_b` 降序、`gene_id` 升序排列。
+- `pseudobulk_marker_chart.tsv`：前三列同上，随后为 `rank`、`gene_id`、
+  `log_fc_a_vs_b`、`p_value`、`p_value_adj`、`neg_log10_p_adj`；每个比较
+  取前 20 个基因，沿用同一排序，`rank` 自 1 起在每个比较内单独编号。
+
+`run.json` 的 `input.replicate_metadata` 记录元数据文件名、原始字节
+SHA-256、质控前各样体细胞数（`sample_sizes`，按输入细胞首次出现顺序）、
+质控后各样体保留细胞数（`sample_sizes_after_qc`，按样本 ID 升序）、
+质控前各分组细胞数（`group_sizes`，按 group 升序）、质控前后重复数
+（`replicates_before_qc`/`replicates_after_qc`）与质控后各 group 的有效
+重复数（`group_replicates_after_qc`，按 group 升序）；`parameters` 增加
+`"pseudobulk_de": true`；`stage_counts` 增加 `pseudobulk_samples`、
+`pseudobulk_groups`、`pseudobulk_comparisons` 与
+`pseudobulk_marker_tests`（比较数 × 保留基因数）。其余字段不变。该参数可与
+`--metadata`、`--batch-metadata`、`--cell-metadata`、`--gene-sets` 并用；
+新增文件沿用事务性发布与最短往返浮点格式，同输入同版本逐字节一致；
+目标目录问题仍由 `OutputPathError`（退出码 5）报告。
 
 ## 约定
 

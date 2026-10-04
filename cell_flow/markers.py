@@ -12,7 +12,7 @@
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from .linalg import benjamini_hochberg, welch_ttest
 from .normalize import NormalizedData
@@ -192,21 +192,25 @@ GroupComparison = Tuple[str, str, str, List[GroupMarkerRecord]]
 
 
 def _group_comparison(
-    data: NormalizedData,
-    cells_a: List[int],
-    cells_b: List[int],
+    gene_ids: Sequence[str],
+    values: Sequence[Sequence[float]],
+    obs_a: List[int],
+    obs_b: List[int],
     comparison_type: str,
     group_a: str,
     group_b: str,
 ) -> List[GroupMarkerRecord]:
-    """两组保留细胞之间逐基因检验：均值差即 log_fc，Welch t 检验，
-    并在本比较内跨基因做 BH 校正。"""
+    """两组观测之间逐基因检验：均值差即 log_fc，Welch t 检验，
+    并在本比较内跨基因做 BH 校正。
+
+    ``values[g][i]`` 为基因 ``g`` 在第 ``i`` 个观测（细胞或样本）上的
+    表达值；``obs_a``/``obs_b`` 为两组观测的列下标。"""
     records: List[GroupMarkerRecord] = []
     pvalues: List[float] = []
-    for g, gene_id in enumerate(data.gene_ids):
-        row = data.analysis_values[g]
-        values_a = [row[c] for c in cells_a]
-        values_b = [row[c] for c in cells_b]
+    for g, gene_id in enumerate(gene_ids):
+        row = values[g]
+        values_a = [row[i] for i in obs_a]
+        values_b = [row[i] for i in obs_b]
         mean_a = sum(values_a) / len(values_a)
         mean_b = sum(values_b) / len(values_b)
         log_fc = mean_a - mean_b
@@ -247,39 +251,57 @@ def _group_comparison(
     return records
 
 
-def find_group_markers(
-    data: NormalizedData, cell_groups: List[str]
+def run_group_comparisons(
+    gene_ids: Sequence[str],
+    values: Sequence[Sequence[float]],
+    obs_groups: Sequence[str],
 ) -> List[GroupComparison]:
-    """按分组的差异表达：每个分组 one-vs-rest，再按分组升序两两比较。
+    """按分组的差异表达通用实现：每个分组 one-vs-rest，再按分组升序两两比较。
 
-    ``cell_groups`` 与 ``data.cell_ids`` 对齐（仅含质控后保留细胞）。
-    检验只用保留细胞的 log-归一化表达；返回先全部 one-vs-rest（分组升序）、
-    再全部 (a, b)（a < b，均按分组升序）成对比较的比较列表；每个比较内
-    记录按校正 P 值升序、log_fc_a_vs_b 降序、基因 ID 升序稳定排序，
-    BH 校正以单个比较内的全部保留基因为一个校正家族。
+    ``values`` 为基因（行）× 观测（列）矩阵，``obs_groups`` 与列对齐。
+    观测可为细胞（log 归一化表达）或样本（pseudobulk log 归一化表达）。
+    返回先全部 one-vs-rest（分组升序）、再全部 (a, b)（a < b，均按分组
+    升序）成对比较的比较列表；每个比较内记录按校正 P 值升序、
+    log_fc_a_vs_b 降序、基因 ID 升序稳定排序，BH 校正以单个比较内的
+    全部基因为一个校正家族。
     """
-    group_to_cells: Dict[str, List[int]] = {}
-    for c, group in enumerate(cell_groups):
-        group_to_cells.setdefault(group, []).append(c)
+    group_to_obs: Dict[str, List[int]] = {}
+    for i, group in enumerate(obs_groups):
+        group_to_obs.setdefault(group, []).append(i)
 
-    present = sorted(group_to_cells)
+    present = sorted(group_to_obs)
     comparisons: List[GroupComparison] = []
     for group in present:
-        in_cells = group_to_cells[group]
-        out_cells = [c for c in range(len(data.cell_ids)) if cell_groups[c] != group]
+        obs_in = group_to_obs[group]
+        obs_out = [i for i in range(len(obs_groups)) if obs_groups[i] != group]
         records = _group_comparison(
-            data, in_cells, out_cells, ONE_VS_REST, group, ""
+            gene_ids, values, obs_in, obs_out, ONE_VS_REST, group, ""
         )
         comparisons.append((ONE_VS_REST, group, "", records))
     for i, group_a in enumerate(present):
         for group_b in present[i + 1:]:
             records = _group_comparison(
-                data,
-                group_to_cells[group_a],
-                group_to_cells[group_b],
+                gene_ids,
+                values,
+                group_to_obs[group_a],
+                group_to_obs[group_b],
                 PAIRWISE,
                 group_a,
                 group_b,
             )
             comparisons.append((PAIRWISE, group_a, group_b, records))
     return comparisons
+
+
+def find_group_markers(
+    data: NormalizedData, cell_groups: List[str]
+) -> List[GroupComparison]:
+    """按分组的差异表达：每个分组 one-vs-rest，再按分组升序两两比较。
+
+    ``cell_groups`` 与 ``data.cell_ids`` 对齐（仅含质控后保留细胞）。
+    检验只用保留细胞的 log-归一化表达；比较顺序、排序与 BH 口径见
+    :func:`run_group_comparisons`。
+    """
+    return run_group_comparisons(
+        data.gene_ids, data.analysis_values, cell_groups
+    )

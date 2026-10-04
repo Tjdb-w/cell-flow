@@ -28,6 +28,7 @@ from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
 from .pca import PCAResult
 from .qc import QCResult
+from .replicate import PseudobulkData
 from .selection import ClusterSelectionResult
 
 TOP_N_MARKERS = 20
@@ -61,6 +62,7 @@ class Artifacts:
     batch_summary: Optional[List[BatchSummaryRow]] = None
     gene_set_scores: Optional[GeneSetScores] = None
     cell_batch_report: Optional[CellBatchReport] = None
+    pseudobulk: Optional[PseudobulkData] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -491,6 +493,20 @@ def _group_marker_chart_tsv(comparisons: List[GroupComparison]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _pseudobulk_expression_tsv(bulk: PseudobulkData) -> str:
+    """质控后保留基因（原行序）× 样本（输入细胞首次出现顺序）的
+    pseudobulk log 归一化表达。
+
+    数值为按样本对保留基因原始计数求和后，除以该样本文库总计数乘 10000、
+    再取 ln(x + 1)；总计数为零的样本按 0.0 写出。
+    """
+    lines = [tsv_row(["gene_id"] + list(bulk.sample_ids))]
+    for g, gene_id in enumerate(bulk.gene_ids):
+        row = [gene_id] + [fmt_float(value) for value in bulk.values[g]]
+        lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
 def _normalized_expression_tsv(data: NormalizedData) -> str:
     """质控后保留基因（原行序）× 保留细胞（原列序）的 log 归一化表达。
 
@@ -737,6 +753,11 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         final_names.append("cell_metadata.tsv")
         final_names.append("batch_pca_scatter.tsv")
         final_names.append("batch_mixing.tsv")
+    if artifacts.pseudobulk is not None:
+        # 仅 --replicate-metadata 运行产出 pseudobulk 产物；未提供时文件集不变
+        final_names.append("pseudobulk_expression.tsv")
+        final_names.append("pseudobulk_group_markers.tsv")
+        final_names.append("pseudobulk_marker_chart.tsv")
     final_names.append("run.json")
 
     payload: List[Tuple[str, str]] = [
@@ -829,6 +850,25 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         )
         payload.append(
             ("batch_mixing.tsv", _batch_mixing_tsv(artifacts.cell_batch_report))
+        )
+    if artifacts.pseudobulk is not None:
+        payload.append(
+            (
+                "pseudobulk_expression.tsv",
+                _pseudobulk_expression_tsv(artifacts.pseudobulk),
+            )
+        )
+        payload.append(
+            (
+                "pseudobulk_group_markers.tsv",
+                _group_markers_tsv(artifacts.pseudobulk.comparisons),
+            )
+        )
+        payload.append(
+            (
+                "pseudobulk_marker_chart.tsv",
+                _group_marker_chart_tsv(artifacts.pseudobulk.comparisons),
+            )
         )
     payload.append(("run.json", _run_json(artifacts.run_info)))
 
