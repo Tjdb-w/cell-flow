@@ -6,7 +6,7 @@
         [--input-format tsv|mtx] [--metadata <细胞分组.tsv>] \\
         [--batch-metadata <细胞批次.tsv>] [--gene-sets <基因集.tsv>] \\
         [--cell-metadata <细胞元数据.tsv>] [--batch-column batch] \\
-        [--sample-column sample_id] \\
+        [--sample-column sample_id] [--replicate-metadata <生物学重复.tsv>] \\
         [--min-genes 200] [--max-mito-fraction 0.2] [--min-cells 3] \\
         [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617]
 """
@@ -25,7 +25,7 @@ USAGE = (
     "                [--input-format tsv|mtx] [--metadata <细胞分组.tsv>]\n"
     "                [--batch-metadata <细胞批次.tsv>] [--gene-sets <基因集.tsv>]\n"
     "                [--cell-metadata <细胞元数据.tsv>] [--batch-column 列名]\n"
-    "                [--sample-column 列名]\n"
+    "                [--sample-column 列名] [--replicate-metadata <生物学重复.tsv>]\n"
     "                [--min-genes N] [--max-mito-fraction F] [--min-cells N]\n"
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
     "                [--n-clusters N|auto] [--seed N]\n"
@@ -79,6 +79,10 @@ def _build_analyze_config(options: dict) -> Config:
     if cell_metadata_path == "":
         # --cell-metadata= 同上：空路径属配置错误
         raise _fail_usage("--cell-metadata 路径为空")
+    replicate_metadata_path = options.get("replicate_metadata")
+    if replicate_metadata_path == "":
+        # --replicate-metadata= 同上：空路径属配置错误
+        raise _fail_usage("--replicate-metadata 路径为空")
     return Config(
         input_path=options["input"],
         output_dir=options["output_dir"],
@@ -99,6 +103,7 @@ def _build_analyze_config(options: dict) -> Config:
         cell_metadata_path=cell_metadata_path,
         batch_column=options["batch_column"],
         sample_column=options["sample_column"],
+        replicate_metadata_path=replicate_metadata_path,
     )
 
 
@@ -122,6 +127,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--cell-metadata": "cell_metadata",
         "--batch-column": "batch_column",
         "--sample-column": "sample_column",
+        "--replicate-metadata": "replicate_metadata",
         "--min-genes": "min_genes",
         "--max-mito-fraction": "max_mito_fraction",
         "--min-cells": "min_cells",

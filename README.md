@@ -203,6 +203,49 @@ UTF-8 制表符文本，表头恰为 `set_id`、`gene_id` 两列；每行一个
 浮点格式沿用既有结果口径（最短往返表示），重复运行逐字节一致；目标非空
 或暂存、写出、发布失败报 `OutputPathError`（退出码 5）。
 
+### `--replicate-metadata`（可选，按生物学重复的 pseudobulk 差异表达）
+
+`--replicate-metadata <路径>`（`--key value` 与 `--key=value` 均可）指向
+一个 UTF-8 制表符文本，表头恰为 `cell_id`、`sample_id`、`group` 三列；
+每个输入细胞恰好一行，`cell_id` 唯一，`sample_id` 与 `group` 非空，
+同一 `sample_id` 只能属于一个 `group`，且细胞集合与表达矩阵一一对应
+（不多不少）。文件可为纯文本或单成员 gzip（按 gzip 魔数识别，与文件名
+无关）。文件、编码、表头、行、ID、覆盖关系或 gzip 不合法一律报输入错误
+（退出码 2）；参数缺值、空路径或未知参数报配置错误（退出码 3）。任何
+输入失败都不会创建或修改结果目录。
+
+分析只使用既有 QC 保留的细胞与基因（输入、QC、聚类、批次校正、基因集
+评分与全部既有图表行为不变）：按 `sample_id` 对原始计数求和，把每个
+样本文库（该样本保留基因总计数）归一到 10000 后做 `log1p`。样本列按
+该样本细胞在输入矩阵中的首次出现顺序排列，基因保持 QC 保留基因的原
+行序。每个 group 先做 one-vs-rest（该组全部样本对比其余全部样本，
+`group_b` 为空），再按 group 升序两两比较；以样本为观测值做 Welch
+t 检验与双侧 P 值，并在每个比较内跨基因做 BH 校正。质控后样本无细胞、
+某 group 有效重复少于两个，或不足两个 group，报数据错误（退出码 4）。
+
+提供该参数时在既有结果之外新增三个文件（其余结果文件与不提供时逐字节
+一致，`run.json` 除外）：
+
+- `pseudobulk_expression.tsv`：首列 `gene_id`（保持保留基因顺序），
+  其余列为样本（按输入细胞首次出现顺序），值为样本求和计数经文库归一
+  到 10000 后的 `log1p`。
+- `pseudobulk_group_markers.tsv`：前三列为 `comparison_type`、
+  `group_a`、`group_b`（one-vs-rest 的 `group_b` 为空），其余统计列
+  沿用 `group_markers.tsv`：`gene_id`、`mean_in_a`、`mean_in_b`、
+  `log_fc_a_vs_b`（均值差）、`t_stat`、`p_value`、`p_value_adj`
+  （比较内 BH）。每个比较内按校正 P 值升序、`log_fc_a_vs_b` 降序、
+  `gene_id` 升序排列。
+- `pseudobulk_marker_chart.tsv`：每个比较取前 20 个基因并给出
+  `rank`（每个比较从 1 开始），比较与基因顺序沿用全量表。
+
+`run.json` 的 `input.replicate_metadata` 记录元数据文件名、原始字节
+SHA-256 与质控前后样本/分组数及各自规模；`parameters` 增加
+`"pseudobulk_de": true`；新增顶层 `pseudobulk_de` 记录归一目标、
+质控后样本与分组数、各组重复数、one-vs-rest/两两比较数与逐基因检验
+计数；既有字段不变。新增文件沿用事务性发布与最短往返浮点格式，重复
+运行逐字节一致；目标非空或暂存、写出、发布失败报 `OutputPathError`
+（退出码 5）。
+
 ## 约定
 
 - 公开行为以 README 与源码为准。

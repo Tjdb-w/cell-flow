@@ -28,6 +28,7 @@ from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
 from .pca import PCAResult
 from .qc import QCResult
+from .replicate import PseudobulkComparison, PseudobulkExpression
 from .selection import ClusterSelectionResult
 
 TOP_N_MARKERS = 20
@@ -61,6 +62,8 @@ class Artifacts:
     batch_summary: Optional[List[BatchSummaryRow]] = None
     gene_set_scores: Optional[GeneSetScores] = None
     cell_batch_report: Optional[CellBatchReport] = None
+    pseudobulk: Optional[PseudobulkExpression] = None
+    pseudobulk_comparisons: Optional[List[PseudobulkComparison]] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -491,6 +494,99 @@ def _group_marker_chart_tsv(comparisons: List[GroupComparison]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _pseudobulk_expression_tsv(expression: PseudobulkExpression) -> str:
+    """QC 保留基因（原行序）× 样本（样本细胞首次出现顺序）的 pseudobulk
+    log 归一化表达：样本内保留细胞原始计数求和，除以该样本在保留基因上的
+    总计数后乘 10000，再取 ln(x + 1)；总计数为零的样本按 0.0 写出。"""
+    lines = [tsv_row(["gene_id"] + list(expression.sample_ids))]
+    for g, gene_id in enumerate(expression.gene_ids):
+        row = [gene_id] + [fmt_float(value) for value in expression.values[g]]
+        lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
+def _pseudobulk_group_markers_tsv(
+    comparisons: List[PseudobulkComparison],
+) -> str:
+    """pseudobulk 分组差异表达全量结果；统计列沿用 group_markers.tsv，
+    前三列为 comparison_type、group_a、group_b（one-vs-rest 的 group_b 为空）。
+    """
+    lines = [
+        tsv_row(
+            [
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "gene_id",
+                "mean_in_a",
+                "mean_in_b",
+                "log_fc_a_vs_b",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for _, _, _, records in comparisons:
+        for r in records:
+            lines.append(
+                tsv_row(
+                    [
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        r.gene_id,
+                        fmt_float(r.mean_in_a),
+                        fmt_float(r.mean_in_b),
+                        fmt_float(r.log_fc_a_vs_b),
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _pseudobulk_marker_chart_tsv(
+    comparisons: List[PseudobulkComparison],
+) -> str:
+    """每个比较取前 20 个基因并给出 rank；比较与基因顺序沿用全量结果。"""
+    lines = [
+        tsv_row(
+            [
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "rank",
+                "gene_id",
+                "log_fc_a_vs_b",
+                "p_value",
+                "p_value_adj",
+                "neg_log10_p_adj",
+            ]
+        )
+    ]
+    for _, _, _, records in comparisons:
+        for rank, r in enumerate(records[:TOP_N_MARKERS], start=1):
+            lines.append(
+                tsv_row(
+                    [
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        rank,
+                        r.gene_id,
+                        fmt_float(r.log_fc_a_vs_b),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                        _neg_log10_p_adj(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
 def _normalized_expression_tsv(data: NormalizedData) -> str:
     """质控后保留基因（原行序）× 保留细胞（原列序）的 log 归一化表达。
 
@@ -737,6 +833,11 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         final_names.append("cell_metadata.tsv")
         final_names.append("batch_pca_scatter.tsv")
         final_names.append("batch_mixing.tsv")
+    if artifacts.pseudobulk is not None:
+        # 仅 --replicate-metadata 运行产出 pseudobulk 产物；未提供时文件集不变
+        final_names.append("pseudobulk_expression.tsv")
+        final_names.append("pseudobulk_group_markers.tsv")
+        final_names.append("pseudobulk_marker_chart.tsv")
     final_names.append("run.json")
 
     payload: List[Tuple[str, str]] = [
@@ -829,6 +930,26 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         )
         payload.append(
             ("batch_mixing.tsv", _batch_mixing_tsv(artifacts.cell_batch_report))
+        )
+    if artifacts.pseudobulk is not None:
+        assert artifacts.pseudobulk_comparisons is not None
+        payload.append(
+            (
+                "pseudobulk_expression.tsv",
+                _pseudobulk_expression_tsv(artifacts.pseudobulk),
+            )
+        )
+        payload.append(
+            (
+                "pseudobulk_group_markers.tsv",
+                _pseudobulk_group_markers_tsv(artifacts.pseudobulk_comparisons),
+            )
+        )
+        payload.append(
+            (
+                "pseudobulk_marker_chart.tsv",
+                _pseudobulk_marker_chart_tsv(artifacts.pseudobulk_comparisons),
+            )
         )
     payload.append(("run.json", _run_json(artifacts.run_info)))
 

@@ -23,6 +23,13 @@ from .normalize import normalize_and_select_hvg
 from .output import Artifacts, publish_results
 from .pca import MAX_PCS, run_pca
 from .qc import compute_qc
+from .replicate import (
+    PseudobulkComparison,
+    PseudobulkExpression,
+    build_pseudobulk,
+    find_pseudobulk_markers,
+    read_replicate_metadata,
+)
 from .selection import select_cluster_count
 
 DEFAULT_SEED = 20240617
@@ -51,6 +58,7 @@ class Config:
     cell_metadata_path: Optional[str] = None
     batch_column: str = DEFAULT_BATCH_COLUMN
     sample_column: str = DEFAULT_SAMPLE_COLUMN
+    replicate_metadata_path: Optional[str] = None
 
     @property
     def auto_clusters(self) -> bool:
@@ -77,6 +85,9 @@ class Config:
             # 仅跨样本批次校正运行记录列名参数；未提供时 parameters 与基线一致
             parameters["batch_column"] = self.batch_column
             parameters["sample_column"] = self.sample_column
+        if self.replicate_metadata_path is not None:
+            # 仅 pseudobulk 运行记录该参数；未提供时 parameters 与基线一致
+            parameters["pseudobulk_de"] = True
         return parameters
 
 
@@ -165,6 +176,11 @@ def run(config: Config) -> List[str]:
     gene_sets = None
     if config.gene_sets_path is not None:
         gene_sets = read_gene_sets(config.gene_sets_path)
+    replicate_metadata = None
+    if config.replicate_metadata_path is not None:
+        replicate_metadata = read_replicate_metadata(
+            config.replicate_metadata_path, matrix.cell_ids
+        )
 
     qc = compute_qc(
         matrix,
@@ -338,6 +354,16 @@ def run(config: Config) -> List[str]:
             analysis_values=normalized.analysis_values,
         )
 
+    # pseudobulk 差异表达：只用 QC 保留细胞与基因的原始计数，按 sample_id
+    # 求和，样本文库归一到 10000 后 log1p，以样本为观测值做 one-vs-rest
+    # 与两两 Welch t 检验。质控后无样本细胞、分组不足两个或组内有效重复
+    # 不足两个都在此处（触碰输出目录之前）报数据错误（退出码 4）
+    pseudobulk: Optional[PseudobulkExpression] = None
+    pseudobulk_comparisons: Optional[List[PseudobulkComparison]] = None
+    if replicate_metadata is not None:
+        pseudobulk = build_pseudobulk(matrix, qc, replicate_metadata)
+        pseudobulk_comparisons = find_pseudobulk_markers(pseudobulk)
+
     # 批次汇总：按 batch 升序，后三项为批次内保留细胞均值
     batch_summary: Optional[List[BatchSummaryRow]] = None
     if batch_metadata is not None or cell_metadata is not None:
@@ -437,6 +463,36 @@ def run(config: Config) -> List[str]:
                 for set_id in gene_set_scores.set_order
             },
         }
+    if replicate_metadata is not None:
+        # 记录重复元数据来源、原始字节 SHA-256 与质控前后样本/分组规模；
+        # 仅提供 --replicate-metadata 时出现，既有 input 字段不变
+        assert pseudobulk is not None
+        kept_sample_sizes: Dict[str, int] = {}
+        for s, sample_id in enumerate(pseudobulk.sample_ids):
+            kept_sample_sizes[sample_id] = pseudobulk.sample_cell_counts[s]
+        kept_group_sizes: Dict[str, int] = {}
+        for group, count in zip(
+            pseudobulk.sample_groups, pseudobulk.sample_cell_counts
+        ):
+            kept_group_sizes[group] = kept_group_sizes.get(group, 0) + count
+        input_info["replicate_metadata"] = {
+            "name": replicate_metadata.name,
+            "sha256": replicate_metadata.sha256,
+            "samples_before_qc": len(replicate_metadata.sample_group),
+            "samples_after_qc": len(pseudobulk.sample_ids),
+            "groups_before_qc": len(replicate_metadata.group_sizes),
+            "groups_after_qc": len(kept_group_sizes),
+            "sample_sizes": replicate_metadata.sample_sizes,
+            "sample_sizes_after_qc": {
+                sample: kept_sample_sizes[sample]
+                for sample in sorted(kept_sample_sizes)
+            },
+            "group_sizes": replicate_metadata.group_sizes,
+            "group_sizes_after_qc": {
+                group: kept_group_sizes[group]
+                for group in sorted(kept_group_sizes)
+            },
+        }
 
     parameters = config.public_parameters()
     if cell_metadata is not None and correction_applied:
@@ -481,6 +537,25 @@ def run(config: Config) -> List[str]:
             "mixing_score_before": cell_batch_report.mixing_before,
             "mixing_score_after": cell_batch_report.mixing_after,
         }
+    if pseudobulk is not None and pseudobulk_comparisons is not None:
+        # pseudobulk 差异表达汇总：归一目标、质控后样本/分组规模、
+        # 比较数与逐基因检验数；仅提供 --replicate-metadata 时出现
+        pb_groups = sorted(set(pseudobulk.sample_groups))
+        group_replicate_sizes = {
+            group: pseudobulk.sample_groups.count(group) for group in pb_groups
+        }
+        n_pb_groups = len(pb_groups)
+        n_comparisons = len(pseudobulk_comparisons)
+        run_info["pseudobulk_de"] = {
+            "library_size_target": 10000,
+            "n_samples": len(pseudobulk.sample_ids),
+            "n_groups": n_pb_groups,
+            "group_replicate_sizes": group_replicate_sizes,
+            "n_comparisons": n_comparisons,
+            "n_one_vs_rest": n_pb_groups,
+            "n_pairwise": n_comparisons - n_pb_groups,
+            "marker_tests": n_comparisons * len(pseudobulk.gene_ids),
+        }
 
     artifacts = Artifacts(
         qc=qc,
@@ -495,6 +570,8 @@ def run(config: Config) -> List[str]:
         batch_summary=batch_summary,
         gene_set_scores=gene_set_scores,
         cell_batch_report=cell_batch_report,
+        pseudobulk=pseudobulk,
+        pseudobulk_comparisons=pseudobulk_comparisons,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障
