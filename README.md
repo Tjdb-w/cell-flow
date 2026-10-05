@@ -204,6 +204,52 @@ UTF-8 制表符文本，表头恰为 `set_id`、`gene_id` 两列；每行一个
 浮点格式沿用既有结果口径（最短往返表示），重复运行逐字节一致；目标非空
 或暂存、写出、发布失败报 `OutputPathError`（退出码 5）。
 
+### `--enrich-markers`（可选，marker 基因集富集）
+
+`--enrich-markers` 是无值开关，须与 `--gene-sets` 同时使用；只给开关
+不给 `--gene-sets`、开关带值（如 `--enrich-markers=x`）、取值参数缺值
+或非法、未知参数一律报配置错误（退出码 3），且不改动结果目录。配套两个
+取值参数，只在开关启用时有效（`--key value` 与 `--key=value` 均可）：
+
+- `--enrichment-alpha`：显著性阈值，`0` 到 `1` 开区间内的有限数值，
+  缺省 `0.05`。
+- `--enrichment-min-log-fc`：log 倍数变化阈值，有限数值，缺省 `0`。
+
+只给上述任一取值参数而不给 `--enrich-markers` 同样报配置错误
+（退出码 3）。基因集文件本身不合法仍报输入错误（退出码 2），集合与
+保留基因交集为空仍报数据错误（退出码 4）。
+
+启用后沿用最终细胞、保留基因、最终簇与 `markers.tsv` 的
+one-versus-rest Welch t 检验结果：每簇命中基因为
+`p_value_adj <= alpha` 且 `log_fc >= 阈值` 的基因，背景为全部保留
+基因。每个集合取集合与背景的交集 `n_set_used`，以命中数不小于观测值
+的超几何单侧 P 值度量富集，并在每簇内跨集合做 BH 校正；矩阵外与被
+QC 剔除的集合成员只计入 `n_set_total`。未启用时既有行为与全部结果
+（TSV、MTX、gzip 各承载方式）逐字节不变；启用时 marker、基因集评分、
+批次校正与细胞类型注释等其余产物照常产出。
+
+启用时在既有结果之外新增两个文件：
+
+- `marker_gene_set_enrichment.tsv`：列为 `cluster`、`set_id`、
+  `n_set_total`、`n_set_used`、`n_markers`（该簇命中基因数）、
+  `n_overlap`、`expected_overlap`、`fold_enrichment`、`odds_ratio`、
+  `p_value`、`p_value_adj`；按 `cluster`、`p_value_adj`、`set_id`
+  升序、`odds_ratio` 降序排列。`expected_overlap` 为
+  `n_markers * n_set_used / 背景基因数`；`fold_enrichment` 为
+  `n_overlap / expected_overlap`，除零取 `0`；`odds_ratio` 按命中
+  与否 × 属于集合与否的 2x2 表四项均加 `0.5` 计算。无命中的集合输出
+  `n_overlap=0`、`p_value=1`、`fold_enrichment=0`。浮点用最短往返
+  表示。
+- `marker_gene_set_enrichment_chart.tsv`：每簇取前 20 行，含 `rank`
+  列，`rank` 自 1 起在每簇内单独编号。
+
+`run.json` 的 `parameters` 增加 `"enrich_markers": true`、
+`"enrichment_alpha"` 与 `"enrichment_min_log_fc"` 三个参数；新增顶层
+`enrichment` 记录各簇命中基因数之和（`n_marker_hits`）与校正后显著的
+（簇, 集合）行数（`n_significant_sets`）；既有字段不变。目标非空或
+暂存、写出、发布失败报 `OutputPathError`（退出码 5），同输入同版本
+逐字节一致。
+
 ### `--replicate-metadata`（可选，按生物学重复的 pseudobulk 差异表达）
 
 `--replicate-metadata <路径>`（`--key value` 与 `--key=value` 均可）指向

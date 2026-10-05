@@ -1,5 +1,6 @@
 """分析管线编排：参数校验 -> 读入 -> QC -> 归一化/HVG -> PCA -> 聚类 -> 差异表达 -> 写出。"""
 
+import math
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Union
 
@@ -18,6 +19,7 @@ from .cell_types import (
     read_cell_type_reference,
 )
 from .doublets import DoubletResult, detect_doublets
+from .enrichment import EnrichmentResult, enrich_marker_gene_sets
 from .errors import CellFlowConfigError, CellFlowDataError, CellFlowError
 from .gene_sets import read_gene_sets, score_gene_sets
 from .io import ExpressionMatrix, read_matrix
@@ -76,6 +78,9 @@ class Config:
     stability_n_samples: Any = DEFAULT_STABILITY_SAMPLES
     stability_sample_fraction: Any = DEFAULT_STABILITY_FRACTION
     stability_seed: Any = DEFAULT_STABILITY_SEED
+    enrich_markers: bool = False
+    enrichment_alpha: float = 0.05
+    enrichment_min_log_fc: float = 0.0
 
     @property
     def auto_clusters(self) -> bool:
@@ -118,6 +123,11 @@ class Config:
         if self.cell_type_reference_path is not None:
             # 仅自动细胞类型注释运行记录该参数；未提供时 parameters 与基线一致
             parameters["cell_type_annotation"] = True
+        if self.enrich_markers:
+            # 仅 marker 富集运行记录这三个参数；未启用时 parameters 与基线一致
+            parameters["enrich_markers"] = True
+            parameters["enrichment_alpha"] = self.enrichment_alpha
+            parameters["enrichment_min_log_fc"] = self.enrichment_min_log_fc
         return parameters
 
 
@@ -159,6 +169,24 @@ def validate_config(config: Config) -> None:
         or not 0.0 <= float(config.expected_doublet_rate) < 1.0
     ):
         errors.append("--expected-doublet-rate 必须是 [0, 1) 内的有限数值")
+    if not isinstance(config.enrich_markers, bool):
+        errors.append("--enrich-markers 必须是无值开关参数")
+    if config.enrich_markers and config.gene_sets_path is None:
+        # marker 富集以基因集为检验对象，必须与 --gene-sets 同时使用
+        errors.append("--enrich-markers 需与 --gene-sets 同时使用")
+    if (
+        not isinstance(config.enrichment_alpha, (int, float))
+        or isinstance(config.enrichment_alpha, bool)
+        or not math.isfinite(float(config.enrichment_alpha))
+        or not 0.0 < float(config.enrichment_alpha) < 1.0
+    ):
+        errors.append("--enrichment-alpha 必须是 (0, 1) 开区间内的有限数值")
+    if (
+        not isinstance(config.enrichment_min_log_fc, (int, float))
+        or isinstance(config.enrichment_min_log_fc, bool)
+        or not math.isfinite(float(config.enrichment_min_log_fc))
+    ):
+        errors.append("--enrichment-min-log-fc 必须是有限数值")
     if config.cell_metadata_path is not None:
         if config.batch_metadata_path is not None:
             errors.append("--cell-metadata 与 --batch-metadata 不能同时使用")
@@ -469,6 +497,21 @@ def run(config: Config) -> List[str]:
             analysis_values=normalized.analysis_values,
         )
 
+    # marker 基因集富集：沿用最终细胞、保留基因、最终簇与 markers 的
+    # one-versus-rest Welch t 检验结果，对基因集做超几何富集检验。
+    # 仅显式启用时计算（validate_config 已要求同时提供 --gene-sets）；
+    # 未启用时 enrichment 为 None，全部既有结果与基线逐字节一致
+    enrichment: Optional[EnrichmentResult] = None
+    if config.enrich_markers:
+        assert gene_sets is not None
+        enrichment = enrich_marker_gene_sets(
+            gene_sets,
+            markers,
+            kept_gene_ids=normalized.gene_ids,
+            alpha=float(config.enrichment_alpha),
+            min_log_fc=float(config.enrichment_min_log_fc),
+        )
+
     # 自动细胞类型注释：只用保留基因/细胞；有批次校正取实际聚类所用中心化值，
     # 否则取 log 归一化值。全部标记与保留基因无交集即在此处（触碰输出目录
     # 之前）报数据错误（退出码 4）。未提供参考时 cell_type_annotations 为 None
@@ -724,6 +767,13 @@ def run(config: Config) -> List[str]:
             else:
                 bucket["unassigned_clusters"] += 1
         run_info["annotation"] = annotation_summary
+    if enrichment is not None:
+        # marker 基因集富集汇总：各簇命中基因数之和与校正后显著的
+        # （簇, 集合）行数；未启用时顶层字段不出现
+        run_info["enrichment"] = {
+            "n_marker_hits": enrichment.n_marker_hits,
+            "n_significant_sets": enrichment.n_significant_sets,
+        }
 
     artifacts = Artifacts(
         qc=qc,
@@ -742,6 +792,7 @@ def run(config: Config) -> List[str]:
         doublets=doublets,
         stability=stability_result,
         cell_type_annotations=cell_type_annotations,
+        enrichment=enrichment,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

@@ -24,6 +24,7 @@ from .batch import BatchSummaryRow
 from .cell_metadata import CellBatchReport
 from .cell_types import CellTypeAnnotations
 from .doublets import DoubletResult
+from .enrichment import EnrichmentRecord, EnrichmentResult
 from .gene_sets import GeneSetScores
 from .kmeans import KMeansResult
 from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
@@ -74,6 +75,7 @@ class Artifacts:
     doublets: Optional[DoubletResult] = None
     stability: Optional[StabilityResult] = None
     cell_type_annotations: Optional[CellTypeAnnotations] = None
+    enrichment: Optional[EnrichmentResult] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -694,6 +696,94 @@ def _gene_set_score_chart_tsv(
     return "\n".join(lines) + "\n"
 
 
+def _marker_gene_set_enrichment_tsv(result: EnrichmentResult) -> str:
+    """逐（簇, 基因集）富集结果；行序即 EnrichmentResult.rows 的全局排序。"""
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "set_id",
+                "n_set_total",
+                "n_set_used",
+                "n_markers",
+                "n_overlap",
+                "expected_overlap",
+                "fold_enrichment",
+                "odds_ratio",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for r in result.rows:
+        lines.append(
+            tsv_row(
+                [
+                    r.cluster,
+                    r.set_id,
+                    r.n_set_total,
+                    r.n_set_used,
+                    r.n_markers,
+                    r.n_overlap,
+                    fmt_float(r.expected_overlap),
+                    fmt_float(r.fold_enrichment),
+                    fmt_float(r.odds_ratio),
+                    fmt_float(r.p_value),
+                    fmt_float(r.p_value_adj),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _marker_gene_set_enrichment_chart_tsv(result: EnrichmentResult) -> str:
+    """每簇取前 20 行的富集图表数据；rank 自 1 起在每簇内单独编号。"""
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "rank",
+                "set_id",
+                "n_set_total",
+                "n_set_used",
+                "n_markers",
+                "n_overlap",
+                "expected_overlap",
+                "fold_enrichment",
+                "odds_ratio",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    rows_by_cluster: Dict[int, List[EnrichmentRecord]] = {}
+    for r in result.rows:
+        rows_by_cluster.setdefault(r.cluster, []).append(r)
+    for cluster in sorted(rows_by_cluster):
+        for rank, r in enumerate(
+            rows_by_cluster[cluster][:TOP_N_MARKERS], start=1
+        ):
+            lines.append(
+                tsv_row(
+                    [
+                        cluster,
+                        rank,
+                        r.set_id,
+                        r.n_set_total,
+                        r.n_set_used,
+                        r.n_markers,
+                        r.n_overlap,
+                        fmt_float(r.expected_overlap),
+                        fmt_float(r.fold_enrichment),
+                        fmt_float(r.odds_ratio),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
 def _cell_metadata_tsv(report: CellBatchReport) -> str:
     """保留细胞的元数据透传：表头与字段保持输入原样，行序同 clusters.tsv。"""
     lines = [tsv_row(report.columns)]
@@ -1086,6 +1176,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         # 仅 --gene-sets 运行产出基因集评分；未提供时文件集与基线一致
         final_names.append("gene_set_scores.tsv")
         final_names.append("gene_set_score_chart.tsv")
+    if artifacts.enrichment is not None:
+        # 仅 --enrich-markers 运行产出富集产物；未启用时文件集与基线一致
+        final_names.append("marker_gene_set_enrichment.tsv")
+        final_names.append("marker_gene_set_enrichment_chart.tsv")
     if artifacts.cell_batch_report is not None:
         # 仅 --cell-metadata 运行产出跨样本批次校正产物；未提供时文件集不变
         final_names.append("cell_metadata.tsv")
@@ -1200,6 +1294,19 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                     artifacts.pca,
                     artifacts.clustering,
                 ),
+            )
+        )
+    if artifacts.enrichment is not None:
+        payload.append(
+            (
+                "marker_gene_set_enrichment.tsv",
+                _marker_gene_set_enrichment_tsv(artifacts.enrichment),
+            )
+        )
+        payload.append(
+            (
+                "marker_gene_set_enrichment_chart.tsv",
+                _marker_gene_set_enrichment_chart_tsv(artifacts.enrichment),
             )
         )
     if artifacts.cell_batch_report is not None:
