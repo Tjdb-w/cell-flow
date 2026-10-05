@@ -14,8 +14,9 @@
 
 入口仍为 `cell-flow analyze --input <路径> --output-dir <结果目录>`，
 新增可选 `--input-format`（取值 `tsv` 或 `mtx`，默认 `tsv`）、
-`--gene-sets` 与 `--replicate-metadata`。`--key value` 与 `--key=value`
-两种写法均支持。跨样本批次校正见下文 `--cell-metadata`。
+`--gene-sets`、`--replicate-metadata` 与 `--cell-type-reference`。
+`--key value` 与 `--key=value` 两种写法均支持。跨样本批次校正见下文
+`--cell-metadata`。
 
 ### `tsv`（默认，UTF-8 制表符基因计数矩阵）
 
@@ -337,6 +338,51 @@ rate 为 0 不标记，且任何情况下至少保留一个细胞。过滤后按
 表达结果。该分析可与 `--metadata`、`--batch-metadata`、`--cell-metadata`、
 `--gene-sets`、`--replicate-metadata`、`--detect-doublets` 并用；
 TSV、MTX、gzip 各输入承载方式下等价矩阵的结果一致性保持不变。
+
+### `--cell-type-reference`（可选，自动细胞类型注释）
+
+`--cell-type-reference <路径>`（`--key value` 与 `--key=value` 均可）指向
+一个 UTF-8 制表符文本，表头恰为 `cell_type`、`gene_id` 两列；每行一个
+标记关系，两列均非空、`(cell_type, gene_id)` 组合唯一，且至少一条数据行。
+文件可为纯文本或单成员 gzip（按 gzip 魔数识别，与文件名无关）。基因 ID
+与质控后保留基因**精确匹配**，不做大小写、别名、前缀转换；矩阵外或被
+QC 剔除的标记只计入该类型总标记数，不参与评分。文件不存在/不可读、不是
+普通文件、不是 UTF-8、表头不符、字段为空、标记关系重复、没有数据行，或
+gzip 多成员、尾随数据、截断、CRC/长度错误，一律报输入错误（退出码 2）
+且不触碰输出目录；参数缺值、`--cell-type-reference=` 空路径或出现未知
+参数报配置错误（退出码 3）。全部标记与保留基因无交集报数据错误
+（退出码 4），同样不产出任何结果。
+
+注释只用质控后保留的细胞与基因，取值与实际聚类批次校正口径一致：有
+`--batch-metadata`/`--cell-metadata` 的实际批次均值中心化时取校正值，
+否则取 log 归一化值。对每个最终簇与每个细胞类型，仅使用同时列于该类型
+标记表且命中保留基因的标记，逐基因求“该簇均值减其余簇均值”，再对这些
+标记取算术平均作为该（簇, 类型）候选分数。没有任何命中保留基因标记的
+类型在该簇不参与竞争；允许多个簇注释为同一类型。每簇取分数最高的类型，
+`cell_type` 并列时按 Unicode 码点升序取第一；最高分不大于 0 时
+`annotation_status` 为 `unassigned`，但仍保留最高分候选类型与其分数。
+
+启用时在既有结果之外新增两个文件（其余结果与不提供时逐字节一致，
+`run.json` 除外）：
+
+- `cluster_annotations.tsv`：按 `cluster` 升序，列为 `cluster`、`n_cells`、
+  `cell_type`、`annotation_status`、`score`、`n_markers_total`、
+  `n_markers_used`；`score` 为获胜候选分数，`n_markers_total` 为获胜类型
+  参考表标记总数，`n_markers_used` 为命中保留基因并实际参与平均的标记数。
+- `cluster_annotation_chart.tsv`：细胞顺序沿用 `pca_scatter.tsv`，仅含最终
+  细胞，在其 `cell_id`、`PC1`、`PC2`、`cluster` 四列上追加 `cell_type`、
+  `annotation_status`、`score`；浮点用最短往返表示。
+
+`run.json` 的 `input.cell_type_reference` 记录参考文件名、原始字节
+SHA-256（gzip 载体按压缩字节计算）与各类型总标记数（`marker_counts`，
+按 `cell_type` 升序）；`parameters` 增加 `"cell_type_annotation": true`；
+新增顶层 `annotation`，按类型汇总其作为获胜类型被注释
+（`assigned_clusters`）与最高分不大于 0 而未注释
+（`unassigned_clusters`）的簇数。未提供该参数时全部行为与基线逐字节
+一致；该参数可与其余全部可选功能并用，不改变它们的结果与口径。浮点格式
+沿用既有结果口径（最短往返表示），同输入、配置与种子下注释、排序与图表
+数据逐字节一致；目录非空或暂存、写出、发布失败报 `OutputPathError`
+（退出码 5）。
 
 ## 约定
 

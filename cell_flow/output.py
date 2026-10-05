@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .errors import OutputPathError
 from .batch import BatchSummaryRow
 from .cell_metadata import CellBatchReport
+from .cell_types import CellTypeAnnotations
 from .doublets import DoubletResult
 from .gene_sets import GeneSetScores
 from .kmeans import KMeansResult
@@ -72,6 +73,7 @@ class Artifacts:
     pseudobulk: Optional[PseudobulkData] = None
     doublets: Optional[DoubletResult] = None
     stability: Optional[StabilityResult] = None
+    cell_type_annotations: Optional[CellTypeAnnotations] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -244,6 +246,84 @@ def _pca_scatter_tsv(pca: PCAResult, clustering: KMeansResult) -> str:
                     fmt_float(pc1),
                     fmt_float(pc2),
                     clustering.labels[c],
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _cluster_annotations_tsv(annotations: CellTypeAnnotations) -> str:
+    """按 cluster 升序的逐簇注释结果。
+
+    最高分不大于 0 时 annotation_status 为 unassigned，但 cell_type/score
+    仍取最高分候选；n_markers_total 为该类型参考表标记总数，
+    n_markers_used 为命中保留基因、实际参与平均的标记数。
+    """
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "n_cells",
+                "cell_type",
+                "annotation_status",
+                "score",
+                "n_markers_total",
+                "n_markers_used",
+            ]
+        )
+    ]
+    for a in annotations.clusters:
+        lines.append(
+            tsv_row(
+                [
+                    a.cluster,
+                    a.n_cells,
+                    a.cell_type,
+                    a.annotation_status,
+                    fmt_float(a.score),
+                    a.n_markers_total,
+                    a.n_markers_used,
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _cluster_annotation_chart_tsv(
+    annotations: CellTypeAnnotations,
+    pca: PCAResult,
+    clustering: KMeansResult,
+) -> str:
+    """在 pca_scatter.tsv 的细胞顺序与 cell_id、PC1、PC2、cluster 四列上
+    追加 cell_type、annotation_status、score；仅含最终细胞。"""
+    by_cluster = {a.cluster: a for a in annotations.clusters}
+    lines = [
+        tsv_row(
+            [
+                "cell_id",
+                "PC1",
+                "PC2",
+                "cluster",
+                "cell_type",
+                "annotation_status",
+                "score",
+            ]
+        )
+    ]
+    for c, cell_id in enumerate(pca.cell_ids):
+        pc1 = pca.scores[c][0] if pca.n_pcs >= 1 else 0.0
+        pc2 = pca.scores[c][1] if pca.n_pcs >= 2 else 0.0
+        a = by_cluster[clustering.labels[c]]
+        lines.append(
+            tsv_row(
+                [
+                    cell_id,
+                    fmt_float(pc1),
+                    fmt_float(pc2),
+                    clustering.labels[c],
+                    a.cell_type,
+                    a.annotation_status,
+                    fmt_float(a.score),
                 ]
             )
         )
@@ -1020,6 +1100,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         # 仅 --detect-doublets 运行产出双细胞评分产物；未启用时文件集不变
         final_names.append("doublet_scores.tsv")
         final_names.append("doublet_score_chart.tsv")
+    if artifacts.cell_type_annotations is not None:
+        # 仅 --cell-type-reference 运行产出注释产物；未提供时文件集不变
+        final_names.append("cluster_annotations.tsv")
+        final_names.append("cluster_annotation_chart.tsv")
     stability_payload: List[Tuple[str, str]] = []
     if artifacts.stability is not None:
         # 仅 --stability-analysis 运行产出三个稳定性文件；未启用时文件集不变
@@ -1158,6 +1242,23 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             (
                 "doublet_score_chart.tsv",
                 _doublet_score_chart_tsv(artifacts.doublets),
+            )
+        )
+    if artifacts.cell_type_annotations is not None:
+        payload.append(
+            (
+                "cluster_annotations.tsv",
+                _cluster_annotations_tsv(artifacts.cell_type_annotations),
+            )
+        )
+        payload.append(
+            (
+                "cluster_annotation_chart.tsv",
+                _cluster_annotation_chart_tsv(
+                    artifacts.cell_type_annotations,
+                    artifacts.pca,
+                    artifacts.clustering,
+                ),
             )
         )
     payload.extend(stability_payload)

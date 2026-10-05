@@ -12,6 +12,11 @@ from .cell_metadata import (
     batch_mixing_score,
     read_cell_metadata,
 )
+from .cell_types import (
+    CellTypeAnnotations,
+    annotate_clusters,
+    read_cell_type_reference,
+)
 from .doublets import DoubletResult, detect_doublets
 from .errors import CellFlowConfigError, CellFlowDataError, CellFlowError
 from .gene_sets import read_gene_sets, score_gene_sets
@@ -64,6 +69,7 @@ class Config:
     batch_column: str = DEFAULT_BATCH_COLUMN
     sample_column: str = DEFAULT_SAMPLE_COLUMN
     replicate_metadata_path: Optional[str] = None
+    cell_type_reference_path: Optional[str] = None
     detect_doublets: bool = False
     expected_doublet_rate: float = 0.08
     stability_analysis: bool = False
@@ -109,6 +115,9 @@ class Config:
             parameters["stability_n_samples"] = self.stability_n_samples
             parameters["stability_sample_fraction"] = self.stability_sample_fraction
             parameters["stability_seed"] = self.stability_seed
+        if self.cell_type_reference_path is not None:
+            # 仅自动细胞类型注释运行记录该参数；未提供时 parameters 与基线一致
+            parameters["cell_type_annotation"] = True
         return parameters
 
 
@@ -219,6 +228,13 @@ def run(config: Config) -> List[str]:
     if config.replicate_metadata_path is not None:
         replicate_metadata = read_replicate_metadata(
             config.replicate_metadata_path, matrix.cell_ids
+        )
+    # 细胞类型标记参考同属输入：先完成读取与校验，任何不合法都在触碰输出
+    # 目录之前失败；标记与保留基因无交集在质控后按数据错误（退出码 4）处理
+    cell_type_reference = None
+    if config.cell_type_reference_path is not None:
+        cell_type_reference = read_cell_type_reference(
+            config.cell_type_reference_path
         )
 
     qc = compute_qc(
@@ -453,6 +469,18 @@ def run(config: Config) -> List[str]:
             analysis_values=normalized.analysis_values,
         )
 
+    # 自动细胞类型注释：只用保留基因/细胞；有批次校正取实际聚类所用中心化值，
+    # 否则取 log 归一化值。全部标记与保留基因无交集即在此处（触碰输出目录
+    # 之前）报数据错误（退出码 4）。未提供参考时 cell_type_annotations 为 None
+    cell_type_annotations: Optional[CellTypeAnnotations] = None
+    if cell_type_reference is not None:
+        cell_type_annotations = annotate_clusters(
+            cell_type_reference,
+            kept_gene_ids=normalized.gene_ids,
+            labels=clustering.labels,
+            analysis_values=normalized.analysis_values,
+        )
+
     # 生物学重复 pseudobulk：只用质控后保留细胞与基因，按样本求和原始计数、
     # 样本文库归一到 10000 后 log1p，以样本为观测做分组差异表达。
     # 质控后样本无细胞、group 有效重复不足两个或不足两个 group 在此报数据错误
@@ -589,6 +617,18 @@ def run(config: Config) -> List[str]:
             },
         }
 
+    if cell_type_reference is not None and cell_type_annotations is not None:
+        # 记录标记参考来源、原始字节 SHA-256 与各类型总标记数；
+        # 仅提供 --cell-type-reference 时出现，既有 input 字段不变
+        input_info["cell_type_reference"] = {
+            "name": cell_type_reference.name,
+            "sha256": cell_type_reference.sha256,
+            "marker_counts": {
+                cell_type: cell_type_annotations.totals[cell_type]
+                for cell_type in cell_type_annotations.type_order
+            },
+        }
+
     parameters = config.public_parameters()
     if cell_metadata is not None and correction_applied:
         # 实际施加批次均值中心化时记录；单批次未施加扰动则不记录
@@ -670,6 +710,20 @@ def run(config: Config) -> List[str]:
             "min_adjusted_rand_index": stats["min"],
             "max_adjusted_rand_index": stats["max"],
         }
+    if cell_type_annotations is not None:
+        # 自动细胞类型注释汇总：各类型已注释簇数与最高分不大于 0 而未注释
+        # （获胜候选仍为该类型）的簇数；未提供参考时顶层字段不出现
+        annotation_summary: Dict[str, Any] = {
+            cell_type: {"assigned_clusters": 0, "unassigned_clusters": 0}
+            for cell_type in cell_type_annotations.type_order
+        }
+        for annotation in cell_type_annotations.clusters:
+            bucket = annotation_summary[annotation.cell_type]
+            if annotation.annotation_status == "assigned":
+                bucket["assigned_clusters"] += 1
+            else:
+                bucket["unassigned_clusters"] += 1
+        run_info["annotation"] = annotation_summary
 
     artifacts = Artifacts(
         qc=qc,
@@ -687,6 +741,7 @@ def run(config: Config) -> List[str]:
         pseudobulk=pseudobulk,
         doublets=doublets,
         stability=stability_result,
+        cell_type_annotations=cell_type_annotations,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

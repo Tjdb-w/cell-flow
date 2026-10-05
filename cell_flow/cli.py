@@ -10,6 +10,7 @@
         [--min-genes 200] [--max-mito-fraction 0.2] [--min-cells 3] \\
         [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617] \\
         [--detect-doublets] [--expected-doublet-rate 0.08] \\
+        [--cell-type-reference <标记参考.tsv>] \\
         [--stability-analysis] [--stability-n-samples 100] \\
         [--stability-sample-fraction 0.8] [--stability-seed 20240617]
 """
@@ -38,6 +39,7 @@ USAGE = (
     "                [--mito-prefix PREFIX] [--n-hvg N] [--n-pcs N]\n"
     "                [--n-clusters N|auto] [--seed N]\n"
     "                [--detect-doublets] [--expected-doublet-rate F]\n"
+    "                [--cell-type-reference <标记参考.tsv>]\n"
     "                [--stability-analysis] [--stability-n-samples N]\n"
     "                [--stability-sample-fraction F] [--stability-seed N]\n"
     "      cell-flow --version"
@@ -94,6 +96,11 @@ def _build_analyze_config(options: dict) -> Config:
     if replicate_metadata_path == "":
         # --replicate-metadata= 同上：空路径属配置错误
         raise _fail_usage("--replicate-metadata 路径为空")
+    cell_type_reference_path = options.get("cell_type_reference")
+    if cell_type_reference_path == "":
+        # --cell-type-reference= 属调用不合法（配置错误，退出码 3）；
+        # 内容问题（文件不存在、格式非法）在管线读入阶段按输入错误处理
+        raise _fail_usage("--cell-type-reference 路径为空")
     return Config(
         input_path=options["input"],
         output_dir=options["output_dir"],
@@ -115,6 +122,7 @@ def _build_analyze_config(options: dict) -> Config:
         batch_column=options["batch_column"],
         sample_column=options["sample_column"],
         replicate_metadata_path=replicate_metadata_path,
+        cell_type_reference_path=cell_type_reference_path,
         detect_doublets=bool(options.get("detect_doublets")),
         expected_doublet_rate=_parse_float(
             "--expected-doublet-rate", options["expected_doublet_rate"]
@@ -153,6 +161,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--batch-column": "batch_column",
         "--sample-column": "sample_column",
         "--replicate-metadata": "replicate_metadata",
+        "--cell-type-reference": "cell_type_reference",
         "--min-genes": "min_genes",
         "--max-mito-fraction": "max_mito_fraction",
         "--min-cells": "min_cells",
