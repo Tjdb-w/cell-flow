@@ -12,6 +12,7 @@
         [--detect-doublets] [--expected-doublet-rate 0.08] \\
         [--cell-type-reference <标记参考.tsv>] \\
         [--enrich-markers] [--enrichment-alpha F] [--enrichment-min-log-fc F] \\
+        [--pseudobulk-gene-set-de] \\
         [--stability-analysis] [--stability-n-samples 100] \\
         [--stability-sample-fraction 0.8] [--stability-seed 20240617]
 """
@@ -43,6 +44,7 @@ USAGE = (
     "                [--cell-type-reference <标记参考.tsv>]\n"
     "                [--enrich-markers] [--enrichment-alpha F]\n"
     "                [--enrichment-min-log-fc F]\n"
+    "                [--pseudobulk-gene-set-de]\n"
     "                [--stability-analysis] [--stability-n-samples N]\n"
     "                [--stability-sample-fraction F] [--stability-seed N]\n"
     "      cell-flow --version"
@@ -147,6 +149,7 @@ def _build_analyze_config(options: dict) -> Config:
         enrichment_min_log_fc=_parse_float(
             "--enrichment-min-log-fc", options["enrichment_min_log_fc"]
         ),
+        pseudobulk_gene_set_de=bool(options.get("pseudobulk_gene_set_de")),
     )
 
 
@@ -192,6 +195,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--detect-doublets": "detect_doublets",
         "--stability-analysis": "stability_analysis",
         "--enrich-markers": "enrich_markers",
+        "--pseudobulk-gene-set-de": "pseudobulk_gene_set_de",
     }
     options = {
         "input_format": "tsv",
@@ -259,6 +263,17 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
     if options.get("enrich_markers") and options.get("gene_sets") is None:
         # marker 基因集富集只在 --gene-sets 评分基线上启用
         raise _fail_usage("--enrich-markers 需与 --gene-sets 同时使用")
+
+    if options.get("pseudobulk_gene_set_de") and (
+        options.get("gene_sets") is None
+        or options.get("replicate_metadata") is None
+    ):
+        # pseudobulk 基因集分组差异只在 --gene-sets 与 --replicate-metadata
+        # 同时提供时可用；无值开关带值（--flag=x）已在上方按未知参数拒绝
+        raise _fail_usage(
+            "--pseudobulk-gene-set-de 需与 --gene-sets、"
+            "--replicate-metadata 同时使用"
+        )
 
     enrichment_param_keys = ("enrichment_alpha", "enrichment_min_log_fc")
     if any(key in explicit for key in enrichment_param_keys) and not options.get(

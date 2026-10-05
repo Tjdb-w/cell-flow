@@ -30,6 +30,7 @@ from .kmeans import KMeansResult
 from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
 from .pca import PCAResult
+from .pseudobulk_gene_sets import PseudobulkGeneSetScores
 from .qc import QCResult
 from .replicate import PseudobulkData
 from .selection import ClusterSelectionResult
@@ -76,6 +77,7 @@ class Artifacts:
     stability: Optional[StabilityResult] = None
     cell_type_annotations: Optional[CellTypeAnnotations] = None
     marker_enrichment: Optional[MarkerEnrichment] = None
+    pseudobulk_gene_set_scores: Optional[PseudobulkGeneSetScores] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -595,6 +597,134 @@ def _pseudobulk_expression_tsv(bulk: PseudobulkData) -> str:
     for g, gene_id in enumerate(bulk.gene_ids):
         row = [gene_id] + [fmt_float(value) for value in bulk.values[g]]
         lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
+def _pseudobulk_gene_set_scores_tsv(scores: PseudobulkGeneSetScores) -> str:
+    """set_id 升序、集合内按 pseudobulk 样本顺序的逐样本评分。
+
+    沿用 gene_set_scores.tsv 的评分布局，细胞列改为 sample_id。
+    """
+    lines = [
+        tsv_row(
+            ["set_id", "n_genes_total", "n_genes_used", "sample_id", "score"]
+        )
+    ]
+    for r in scores.rows:
+        lines.append(
+            tsv_row(
+                [
+                    r.set_id,
+                    r.n_total,
+                    r.n_used,
+                    r.sample_id,
+                    fmt_float(r.score),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _pseudobulk_gene_set_score_chart_tsv(
+    scores: PseudobulkGeneSetScores,
+    bulk: PseudobulkData,
+) -> str:
+    """宽表：以 sample_id、group 开头，集合列按 set_id 升序；
+    样本顺序沿用 pseudobulk 样本次序（输入细胞在矩阵列序中的首次出现）。"""
+    score_by_sample: Dict[Tuple[str, str], float] = {
+        (r.set_id, r.sample_id): r.score for r in scores.rows
+    }
+    set_order = scores.set_order
+    lines = [tsv_row(["sample_id", "group"] + set_order)]
+    for s, sample_id in enumerate(bulk.sample_ids):
+        row: List[Any] = [sample_id, bulk.sample_groups[s]]
+        row.extend(
+            fmt_float(score_by_sample[(set_id, sample_id)])
+            for set_id in set_order
+        )
+        lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
+def _pseudobulk_gene_set_de_tsv(scores: PseudobulkGeneSetScores) -> str:
+    """pseudobulk 基因集分组差异，沿用 group marker 布局：
+    set_id 取代 gene_id、score_difference_a_vs_b 取代 log_fc_a_vs_b。
+
+    比较先全部 one-vs-rest（group 升序）再全部 pairwise；每个比较内
+    记录按校正 P 值升序、评分均值差降序、set_id 升序排列（统计模块已定序）。
+    """
+    lines = [
+        tsv_row(
+            [
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "set_id",
+                "mean_in_a",
+                "mean_in_b",
+                "score_difference_a_vs_b",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for _, _, _, records in scores.comparisons:
+        for r in records:
+            lines.append(
+                tsv_row(
+                    [
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        r.gene_id,
+                        fmt_float(r.mean_in_a),
+                        fmt_float(r.mean_in_b),
+                        fmt_float(r.log_fc_a_vs_b),
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _pseudobulk_gene_set_chart_tsv(scores: PseudobulkGeneSetScores) -> str:
+    """每个比较取前 20 个集合：前三列同差异表，group_b 后加 rank，
+    末列为 neg_log10_p_adj；rank 自 1 起在每个比较内单独编号。"""
+    lines = [
+        tsv_row(
+            [
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "rank",
+                "set_id",
+                "score_difference_a_vs_b",
+                "p_value",
+                "p_value_adj",
+                "neg_log10_p_adj",
+            ]
+        )
+    ]
+    for _, _, _, records in scores.comparisons:
+        for rank, r in enumerate(records[:TOP_N_MARKERS], start=1):
+            lines.append(
+                tsv_row(
+                    [
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        rank,
+                        r.gene_id,
+                        fmt_float(r.log_fc_a_vs_b),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                        _neg_log10_p_adj(r.p_value_adj),
+                    ]
+                )
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -1198,6 +1328,13 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         final_names.append("pseudobulk_expression.tsv")
         final_names.append("pseudobulk_group_markers.tsv")
         final_names.append("pseudobulk_marker_chart.tsv")
+    if artifacts.pseudobulk_gene_set_scores is not None:
+        # 仅 --pseudobulk-gene-set-de（必带 --gene-sets 与
+        # --replicate-metadata）运行产出 pseudobulk 基因集产物
+        final_names.append("pseudobulk_gene_set_scores.tsv")
+        final_names.append("pseudobulk_gene_set_score_chart.tsv")
+        final_names.append("pseudobulk_gene_set_de.tsv")
+        final_names.append("pseudobulk_gene_set_chart.tsv")
     if artifacts.doublets is not None:
         # 仅 --detect-doublets 运行产出双细胞评分产物；未启用时文件集不变
         final_names.append("doublet_scores.tsv")
@@ -1349,6 +1486,36 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             (
                 "pseudobulk_marker_chart.tsv",
                 _group_marker_chart_tsv(artifacts.pseudobulk.comparisons),
+            )
+        )
+    if artifacts.pseudobulk_gene_set_scores is not None:
+        payload.append(
+            (
+                "pseudobulk_gene_set_scores.tsv",
+                _pseudobulk_gene_set_scores_tsv(artifacts.pseudobulk_gene_set_scores),
+            )
+        )
+        payload.append(
+            (
+                "pseudobulk_gene_set_score_chart.tsv",
+                _pseudobulk_gene_set_score_chart_tsv(
+                    artifacts.pseudobulk_gene_set_scores,
+                    artifacts.pseudobulk,
+                ),
+            )
+        )
+        payload.append(
+            (
+                "pseudobulk_gene_set_de.tsv",
+                _pseudobulk_gene_set_de_tsv(artifacts.pseudobulk_gene_set_scores),
+            )
+        )
+        payload.append(
+            (
+                "pseudobulk_gene_set_chart.tsv",
+                _pseudobulk_gene_set_chart_tsv(
+                    artifacts.pseudobulk_gene_set_scores
+                ),
             )
         )
     if artifacts.doublets is not None:

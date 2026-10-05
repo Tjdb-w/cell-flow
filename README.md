@@ -16,7 +16,9 @@
 新增可选 `--input-format`（取值 `tsv` 或 `mtx`，默认 `tsv`）、
 `--gene-sets`、`--replicate-metadata` 与 `--cell-type-reference`；
 marker 基因集富集通过 `--enrich-markers` 开关（仅在 `--gene-sets` 基线上
-生效）与 `--enrichment-alpha`、`--enrichment-min-log-fc` 控制。
+生效）与 `--enrichment-alpha`、`--enrichment-min-log-fc` 控制；
+pseudobulk 基因集分组差异通过 `--pseudobulk-gene-set-de` 无值开关启用
+（仅在同时提供 `--gene-sets` 与 `--replicate-metadata` 时生效）。
 `--key value` 与 `--key=value` 两种写法均支持。跨样本批次校正见下文
 `--cell-metadata`。
 
@@ -251,6 +253,54 @@ SHA-256、质控前各样体细胞数（`sample_sizes`，按输入细胞首次�
 `--metadata`、`--batch-metadata`、`--cell-metadata`、`--gene-sets` 并用；
 新增文件沿用事务性发布与最短往返浮点格式，同输入同版本逐字节一致；
 目标目录问题仍由 `OutputPathError`（退出码 5）报告。
+
+### `--pseudobulk-gene-set-de`（可选，pseudobulk 基因集分组差异）
+
+`--pseudobulk-gene-set-de` 是无值开关，只在同时提供 `--gene-sets` 与
+`--replicate-metadata` 时可用：缺任一基线参数即启用开关，或把开关写成
+带值形式（如 `--pseudobulk-gene-set-de=true`），一律报配置错误
+（退出码 3）。开关本身无取值写法，`--key value`/`--key=value` 的取值
+参数写法不受影响。未启用时，全部结果文件与 `run.json` 与基线逐字节一致。
+
+评分只使用质控后保留的基因与细胞汇总出的 pseudobulk log1p 值
+（与 `pseudobulk_expression.tsv` 同口径）：样本按其输入细胞在矩阵列序中的
+首次出现排列，即沿用 pseudobulk 样本次序。`set_id` 只取与保留基因 ID 的
+交集，score 为交集基因 pseudobulk 值的算术平均，并记录 `n_genes_total`
+（文件中的成员总数，含矩阵外与被 QC 剔除成员）与 `n_genes_used`
+（交集大小）。任一集合与保留基因交集为空即报数据错误（退出码 4），
+不产出结果。启用时在既有结果之外新增四个文件（其余文件与不启用时
+逐字节一致，`run.json` 除外）：
+
+- `pseudobulk_gene_set_scores.tsv`：沿用 `gene_set_scores.tsv` 的评分布局，
+  以 `sample_id` 取代 `cell_id`；列为 `set_id`、`n_genes_total`、
+  `n_genes_used`、`sample_id`、`score`，按 `set_id` 升序、集合内按
+  pseudobulk 样本顺序排列。
+- `pseudobulk_gene_set_score_chart.tsv`：沿用基因集评分图表的宽表布局，
+  以 `sample_id`、`group` 开头，各集合列按 `set_id` 升序，样本顺序
+  沿用 pseudobulk 样本次序。
+- `pseudobulk_gene_set_de.tsv`：沿用 marker 分组差异布局，以 `set_id`
+  取代 `gene_id`、`score_difference_a_vs_b` 取代 `log_fc_a_vs_b`；
+  列为 `comparison_type`、`group_a`、`group_b`、`set_id`、`mean_in_a`、
+  `mean_in_b`、`score_difference_a_vs_b`、`t_stat`、`p_value`、
+  `p_value_adj`。每个集合按 group 升序先做 one-vs-rest（`group_b` 为空，
+  差值为 mean_in_a 减 mean_in_b，rest 为该组之外的全部样本），再按
+  group 升序两两比较；检验为 Welch t 双侧，BH 校正以单个比较内的全部
+  集合为一个校正家族。比较先 one-vs-rest 后 pairwise；每个比较内按
+  校正 P 值升序、`score_difference_a_vs_b` 降序、`set_id` 升序排列。
+- `pseudobulk_gene_set_chart.tsv`：每个比较取前 20 个集合，前三列同上，
+  在 `group_b` 之后加入自 1 起、每比较内单独编号的 `rank`，列为
+  `comparison_type`、`group_a`、`group_b`、`rank`、`set_id`、
+  `score_difference_a_vs_b`、`p_value`、`p_value_adj`、`neg_log10_p_adj`
+  （末列）。
+
+`run.json` 的 `parameters` 增加 `"pseudobulk_gene_set_de": true`；
+新增顶层 `gene_set_de` 汇总，含 `set_count`、`sample_count`、
+`comparison_count`、`test_count`（比较数 × 集合数）与
+`min_p_value_adj`（全部检验中的最小校正 P 值）。基因集或重复元数据本身的
+错误仍按各自基线报输入错误（退出码 2），集合与保留基因空交集等数据问题
+报数据错误（退出码 4）；目录非空或暂存、写出、发布失败报
+`OutputPathError`（退出码 5），任何失败都不创建或改动结果目录。
+浮点格式沿用既有最短往返表示；相同输入、配置与种子下新增输出逐字节一致。
 
 ### `--detect-doublets` / `--expected-doublet-rate`（可选，双细胞识别与过滤）
 

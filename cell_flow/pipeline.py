@@ -30,6 +30,10 @@ from .mtx import read_mtx_directory
 from .normalize import normalize_and_select_hvg
 from .output import Artifacts, publish_results
 from .pca import MAX_PCS, run_pca
+from .pseudobulk_gene_sets import (
+    PseudobulkGeneSetScores,
+    score_pseudobulk_gene_sets,
+)
 from .qc import compute_qc
 from .replicate import PseudobulkData, build_pseudobulk, read_replicate_metadata
 from .selection import select_cluster_count
@@ -81,6 +85,7 @@ class Config:
     enrich_markers: bool = False
     enrichment_alpha: float = 0.05
     enrichment_min_log_fc: float = 0.0
+    pseudobulk_gene_set_de: bool = False
 
     @property
     def auto_clusters(self) -> bool:
@@ -110,6 +115,9 @@ class Config:
         if self.replicate_metadata_path is not None:
             # 仅 pseudobulk 运行记录该参数；未提供时 parameters 与基线一致
             parameters["pseudobulk_de"] = True
+        if self.pseudobulk_gene_set_de:
+            # 仅显式启用 pseudobulk 基因集分组差异时记录；未启用时与基线一致
+            parameters["pseudobulk_gene_set_de"] = True
         if self.detect_doublets:
             # 仅双细胞识别运行记录这两个参数；未启用时 parameters 与基线一致
             parameters["detect_doublets"] = True
@@ -186,6 +194,17 @@ def validate_config(config: Config) -> None:
         or not math.isfinite(float(config.enrichment_min_log_fc))
     ):
         errors.append("--enrichment-min-log-fc 必须是有限数值")
+    if not isinstance(config.pseudobulk_gene_set_de, bool):
+        errors.append("--pseudobulk-gene-set-de 必须是无值开关参数")
+    if config.pseudobulk_gene_set_de and (
+        config.gene_sets_path is None or config.replicate_metadata_path is None
+    ):
+        # pseudobulk 基因集分组差异建立在 --gene-sets 评分与
+        # --replicate-metadata pseudobulk 两条基线上
+        errors.append(
+            "--pseudobulk-gene-set-de 需与 --gene-sets、"
+            "--replicate-metadata 同时使用"
+        )
     if config.cell_metadata_path is not None:
         if config.batch_metadata_path is not None:
             errors.append("--cell-metadata 与 --batch-metadata 不能同时使用")
@@ -530,6 +549,15 @@ def run(config: Config) -> List[str]:
     if replicate_metadata is not None:
         pseudobulk = build_pseudobulk(matrix, analysis_qc, replicate_metadata)
 
+    # pseudobulk 基因集分组差异：在 pseudobulk log1p 值上按集合（与保留基因
+    # 交集）给样本评分，再以样本为观测做分组 Welch t/BH。仅在
+    # --pseudobulk-gene-set-de（必带 --gene-sets 与 --replicate-metadata）
+    # 时执行；任一集合交集为空在此报数据错误（退出码 4），不触碰输出目录。
+    pseudobulk_gene_set_scores: Optional[PseudobulkGeneSetScores] = None
+    if config.pseudobulk_gene_set_de:
+        assert gene_sets is not None and pseudobulk is not None
+        pseudobulk_gene_set_scores = score_pseudobulk_gene_sets(gene_sets, pseudobulk)
+
     # 批次汇总：按 batch 升序，后三项为批次内保留细胞均值
     batch_summary: Optional[List[BatchSummaryRow]] = None
     if batch_metadata is not None or cell_metadata is not None:
@@ -775,6 +803,23 @@ def run(config: Config) -> List[str]:
                 1 for r in marker_enrichment.rows if r.p_value_adj <= config.enrichment_alpha
             ),
         }
+    if pseudobulk_gene_set_scores is not None:
+        # pseudobulk 基因集分组差异汇总：集合数、样本数、比较数、检验数
+        # （比较数 × 集合数）与全部检验中的最小校正 P 值；仅显式启用时出现
+        n_pbgs_comparisons = len(pseudobulk_gene_set_scores.comparisons)
+        n_pbgs_sets = len(pseudobulk_gene_set_scores.set_order)
+        adjusted_values = [
+            record.p_value_adj
+            for _, _, _, records in pseudobulk_gene_set_scores.comparisons
+            for record in records
+        ]
+        run_info["gene_set_de"] = {
+            "set_count": n_pbgs_sets,
+            "sample_count": len(pseudobulk.sample_ids),
+            "comparison_count": n_pbgs_comparisons,
+            "test_count": n_pbgs_comparisons * n_pbgs_sets,
+            "min_p_value_adj": min(adjusted_values),
+        }
 
     artifacts = Artifacts(
         qc=qc,
@@ -794,6 +839,7 @@ def run(config: Config) -> List[str]:
         stability=stability_result,
         cell_type_annotations=cell_type_annotations,
         marker_enrichment=marker_enrichment,
+        pseudobulk_gene_set_scores=pseudobulk_gene_set_scores,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障
