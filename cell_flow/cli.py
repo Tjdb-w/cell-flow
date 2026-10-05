@@ -12,6 +12,7 @@
         [--detect-doublets] [--expected-doublet-rate 0.08] \\
         [--cell-type-reference <标记参考.tsv>] \\
         [--enrich-markers] [--enrichment-alpha F] [--enrichment-min-log-fc F] \\
+        [--pseudobulk-gene-set-de] \\
         [--stability-analysis] [--stability-n-samples 100] \\
         [--stability-sample-fraction 0.8] [--stability-seed 20240617]
 """
@@ -43,6 +44,7 @@ USAGE = (
     "                [--cell-type-reference <标记参考.tsv>]\n"
     "                [--enrich-markers] [--enrichment-alpha F]\n"
     "                [--enrichment-min-log-fc F]\n"
+    "                [--pseudobulk-gene-set-de]\n"
     "                [--stability-analysis] [--stability-n-samples N]\n"
     "                [--stability-sample-fraction F] [--stability-seed N]\n"
     "      cell-flow --version"
@@ -147,6 +149,7 @@ def _build_analyze_config(options: dict) -> Config:
         enrichment_min_log_fc=_parse_float(
             "--enrichment-min-log-fc", options["enrichment_min_log_fc"]
         ),
+        pseudobulk_gene_set_de=bool(options.get("pseudobulk_gene_set_de")),
     )
 
 
