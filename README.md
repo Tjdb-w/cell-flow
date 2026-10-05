@@ -14,7 +14,9 @@
 
 入口仍为 `cell-flow analyze --input <路径> --output-dir <结果目录>`，
 新增可选 `--input-format`（取值 `tsv` 或 `mtx`，默认 `tsv`）、
-`--gene-sets`、`--replicate-metadata` 与 `--cell-type-reference`。
+`--gene-sets`、`--replicate-metadata` 与 `--cell-type-reference`；
+marker 基因集富集通过 `--enrich-markers` 开关（仅在 `--gene-sets` 基线上
+生效）与 `--enrichment-alpha`、`--enrichment-min-log-fc` 控制。
 `--key value` 与 `--key=value` 两种写法均支持。跨样本批次校正见下文
 `--cell-metadata`。
 
@@ -384,7 +386,56 @@ SHA-256（gzip 载体按压缩字节计算）与各类型总标记数（`marker_
 数据逐字节一致；目录非空或暂存、写出、发布失败报 `OutputPathError`
 （退出码 5）。
 
-## 约定
+### `--enrich-markers` / `--enrichment-alpha` / `--enrichment-min-log-fc`（可选，marker 基因集富集）
 
+`--enrich-markers` 是无值开关，只在 `--gene-sets` 评分基线上可用：未提供
+`--gene-sets` 时启用开关，或只给两个取值参数而不启用开关，一律报配置错误
+（退出码 3）。配套取值参数（`--key value` 与 `--key=value` 均可）：
+
+- `--enrichment-alpha`：命中与显著性阈值，缺省 `0.05`，必须为 `(0, 1)`
+  开区间内的有限数值（0 与 1 均不合法）。
+- `--enrichment-min-log-fc`：命中的最小对数倍数变化，缺省 `0`，必须为有限
+  数值（允许负数；`inf`/`-inf`/`nan` 不合法）。
+
+开关写成带值形式（如 `--enrich-markers=true`）、取值参数缺值或取值非法
+（非数值、非有限、越界）、未知参数，一律报配置错误（退出码 3）。
+
+富集沿用最终细胞、保留基因、最终簇与 `markers.tsv` 的 one-versus-rest
+Welch t 检验结果，不重新检验。每簇命中基因（marker hits）为该簇
+`p_value_adj <= alpha` 且 `log_fc >= --enrichment-min-log-fc` 的基因；
+背景为全部质控后保留基因。对每个 `set_id` 取集合与背景的交集
+（`n_set_used`），以超几何分布单侧生存函数求“命中数不少于观测值”的 P 值
+（总体为背景、成功为交集基因、抽取为该簇命中），并在每个簇内跨集合做
+Benjamini-Hochberg 校正。集合在文件中的成员总数（含矩阵外、被 QC 剔除的
+成员）记为 `n_set_total`。
+
+`expected_overlap = n_markers * n_set_used / n_background`；
+`fold_enrichment = n_overlap / expected_overlap`，除零取 0；
+`odds_ratio` 按“命中是否属于集合”的 2×2 表（命中且在集合、命中不在集合、
+非命中且在集合、非命中不在集合）四格统一加 0.5 计算。无命中属于集合
+（`n_overlap == 0`）的集合输出 `p_value = 1`、`fold_enrichment = 0`；
+某簇无任何命中基因时该簇全部集合同样按此口径输出。
+
+启用时在既有结果（含 marker、基因集评分、批次校正、注释等全部既有产物）
+之外新增两个文件，其余结果文件与不启用时逐字节一致（`run.json` 除外）：
+
+- `marker_gene_set_enrichment.tsv`：列为 `cluster`、`set_id`、
+  `n_set_total`、`n_set_used`、`n_markers`（命中数）、`n_overlap`、
+  `expected_overlap`、`fold_enrichment`、`odds_ratio`、`p_value`、
+  `p_value_adj`；全部簇 × 全部集合，按 `cluster`、`p_value_adj`、`set_id`
+  升序，`odds_ratio` 降序排列。
+- `marker_gene_set_enrichment_chart.tsv`：每簇取上述排序前 20 行，在
+  `cluster` 后插入自 1 起、每簇内单独编号的 `rank` 列，其余列同上。
+
+`run.json` 的 `parameters` 增加 `"enrich_markers": true`、
+`"enrichment_alpha"` 与 `"enrichment_min_log_fc"`；新增顶层 `enrichment`
+记录全部簇命中基因数之和（`marker_hits`）与 `p_value_adj <= alpha` 的
+显著（簇, 集合）组合数（`significant_sets`）；既有字段不变。基因集文件
+本身的错误仍报输入错误（退出码 2），基因集与保留基因交集为空等数据问题
+报数据错误（退出码 4）；目录非空或暂存、写出、发布失败报
+`OutputPathError`（退出码 5）。未启用 `--enrich-markers` 时全部既有行为、
+TSV/MTX 读取与 gzip 处理与基线逐字节一致。
+
+## 约定
 - 公开行为以 README 与源码为准。
 - 后续需求在此基线上增量实现。

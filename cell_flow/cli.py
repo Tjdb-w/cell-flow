@@ -11,6 +11,7 @@
         [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617] \\
         [--detect-doublets] [--expected-doublet-rate 0.08] \\
         [--cell-type-reference <标记参考.tsv>] \\
+        [--enrich-markers] [--enrichment-alpha F] [--enrichment-min-log-fc F] \\
         [--stability-analysis] [--stability-n-samples 100] \\
         [--stability-sample-fraction 0.8] [--stability-seed 20240617]
 """
@@ -40,6 +41,8 @@ USAGE = (
     "                [--n-clusters N|auto] [--seed N]\n"
     "                [--detect-doublets] [--expected-doublet-rate F]\n"
     "                [--cell-type-reference <标记参考.tsv>]\n"
+    "                [--enrich-markers] [--enrichment-alpha F]\n"
+    "                [--enrichment-min-log-fc F]\n"
     "                [--stability-analysis] [--stability-n-samples N]\n"
     "                [--stability-sample-fraction F] [--stability-seed N]\n"
     "      cell-flow --version"
@@ -137,6 +140,13 @@ def _build_analyze_config(options: dict) -> Config:
         stability_seed=_parse_int(
             "--stability-seed", options["stability_seed"]
         ),
+        enrich_markers=bool(options.get("enrich_markers")),
+        enrichment_alpha=_parse_float(
+            "--enrichment-alpha", options["enrichment_alpha"]
+        ),
+        enrichment_min_log_fc=_parse_float(
+            "--enrichment-min-log-fc", options["enrichment_min_log_fc"]
+        ),
     )
 
 
@@ -162,6 +172,8 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--sample-column": "sample_column",
         "--replicate-metadata": "replicate_metadata",
         "--cell-type-reference": "cell_type_reference",
+        "--enrichment-alpha": "enrichment_alpha",
+        "--enrichment-min-log-fc": "enrichment_min_log_fc",
         "--min-genes": "min_genes",
         "--max-mito-fraction": "max_mito_fraction",
         "--min-cells": "min_cells",
@@ -179,6 +191,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
     flag_options = {
         "--detect-doublets": "detect_doublets",
         "--stability-analysis": "stability_analysis",
+        "--enrich-markers": "enrich_markers",
     }
     options = {
         "input_format": "tsv",
@@ -196,6 +209,8 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "stability_n_samples": str(DEFAULT_STABILITY_SAMPLES),
         "stability_sample_fraction": str(DEFAULT_STABILITY_FRACTION),
         "stability_seed": str(DEFAULT_STABILITY_SEED),
+        "enrichment_alpha": "0.05",
+        "enrichment_min_log_fc": "0",
     }
 
     explicit = set()
@@ -239,6 +254,20 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         raise _fail_usage(
             "--stability-n-samples/--stability-sample-fraction/--stability-seed "
             "需与 --stability-analysis 同时使用"
+        )
+
+    if options.get("enrich_markers") and options.get("gene_sets") is None:
+        # marker 基因集富集只在 --gene-sets 评分基线上启用
+        raise _fail_usage("--enrich-markers 需与 --gene-sets 同时使用")
+
+    enrichment_param_keys = ("enrichment_alpha", "enrichment_min_log_fc")
+    if any(key in explicit for key in enrichment_param_keys) and not options.get(
+        "enrich_markers"
+    ):
+        # 只给富集参数而不启用 --enrich-markers 属配置错误
+        raise _fail_usage(
+            "--enrichment-alpha/--enrichment-min-log-fc 需与 --enrich-markers "
+            "同时使用"
         )
 
     return _build_analyze_config(options)
