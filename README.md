@@ -338,6 +338,48 @@ rate 为 0 不标记，且任何情况下至少保留一个细胞。过滤后按
 `--gene-sets`、`--replicate-metadata`、`--detect-doublets` 并用；
 TSV、MTX、gzip 各输入承载方式下等价矩阵的结果一致性保持不变。
 
+### `--cell-type-reference`（可选，自动细胞类型注释）
+
+`--cell-type-reference <路径>`（`--key value` 与 `--key=value` 均可）指向
+一个 UTF-8 制表符文本，表头恰为 `cell_type`、`gene_id` 两列；每行一个
+“类型-标记”成员关系，字段非空、`(cell_type, gene_id)` 组合唯一，且至少
+一条数据行。文件可为纯文本或单成员 gzip（按 gzip 魔数识别，与文件名
+无关）。文件不是 UTF-8、表头不符、字段为空、成员重复、没有数据行，或
+gzip 多成员、尾随数据、截断、CRC/长度错误，一律报输入错误（退出码 2）
+且不触碰输出目录；`--cell-type-reference` 缺值、空路径或出现未知参数
+报配置错误（退出码 3）。基因 ID 与表达矩阵首列**精确匹配**，不做大小写、
+别名、前缀转换；矩阵外或被质控剔除的标记不计分，只计入该类型的标记总数。
+
+评分只用质控后保留的细胞与基因：有批次校正时取实际用于聚类的批次均值
+中心化值，否则取 log 归一化值；簇标签取最终聚类结果。对某簇某类型，
+逐可用标记基因求“簇内均值减其余簇均值”，再对这些差值取算术平均作为
+该类型的得分。每簇在**有可用标记**的类型中取最高分者；分数并列时按
+`cell_type` 的 Unicode 码点升序取第一；允许多个簇注释为同一类型。
+最高分不大于 0 时 `annotation_status` 为 `unassigned`（候选类型与分数
+仍保留），否则为 `assigned`。全部类型的标记与保留基因交集都为空时报
+数据错误（退出码 4），不产出结果。提供该参数时在既有结果之外新增两个
+文件（其余结果与不提供时逐字节一致，`run.json` 除外）：
+
+- `cluster_annotations.tsv`：按 `cluster` 升序，列为 `cluster`、
+  `n_cells`、`cell_type`、`annotation_status`、`score`、
+  `n_markers_total`（候选类型在参考中的标记总数）、`n_markers_used`
+  （其中与保留基因匹配、实际参与评分的标记数）。
+- `cluster_annotation_chart.tsv`：行序与仅含最终细胞的口径同
+  `pca_scatter.tsv`，在 `cell_id`、`PC1`、`PC2`、`cluster` 之后追加
+  `cell_type`、`annotation_status`、`score` 三列。
+
+`run.json` 的 `input.cell_type_reference` 记录参考文件名、原始字节
+SHA-256 与各类型标记总数（`cell_type_marker_counts`，按 `cell_type`
+码点升序）；`parameters` 增加 `"cell_type_annotation": true`；新增顶层
+`annotation` 汇总簇总数、已注释/未注释簇数及各类型的已注释与未注释
+簇数（`cell_types`，按 `cell_type` 码点升序）；既有字段不变。未提供
+`--cell-type-reference` 时全部行为与基线逐字节一致。浮点格式沿用既有
+结果口径（最短往返表示）；相同输入、配置与随机种子下注释、排序与图表
+数据逐字节一致。该参数可与 `--metadata`、`--batch-metadata`、
+`--cell-metadata`、`--gene-sets`、`--replicate-metadata`、
+`--detect-doublets`、`--stability-analysis` 并用且互不改变其结果与口径；
+目标非空或暂存、写出、发布失败报 `OutputPathError`（退出码 5）。
+
 ## 约定
 
 - 公开行为以 README 与源码为准。

@@ -11,7 +11,8 @@
         [--mito-prefix MT-] [--n-hvg 2000] [--n-clusters 2|auto] [--seed 20240617] \\
         [--detect-doublets] [--expected-doublet-rate 0.08] \\
         [--stability-analysis] [--stability-n-samples 100] \\
-        [--stability-sample-fraction 0.8] [--stability-seed 20240617]
+        [--stability-sample-fraction 0.8] [--stability-seed 20240617] \\
+        [--cell-type-reference <细胞类型标记.tsv>]
 """
 
 import sys
@@ -40,6 +41,7 @@ USAGE = (
     "                [--detect-doublets] [--expected-doublet-rate F]\n"
     "                [--stability-analysis] [--stability-n-samples N]\n"
     "                [--stability-sample-fraction F] [--stability-seed N]\n"
+    "                [--cell-type-reference <细胞类型标记.tsv>]\n"
     "      cell-flow --version"
 )
 
@@ -94,6 +96,10 @@ def _build_analyze_config(options: dict) -> Config:
     if replicate_metadata_path == "":
         # --replicate-metadata= 同上：空路径属配置错误
         raise _fail_usage("--replicate-metadata 路径为空")
+    cell_type_reference_path = options.get("cell_type_reference")
+    if cell_type_reference_path == "":
+        # --cell-type-reference= 同上：空路径属配置错误
+        raise _fail_usage("--cell-type-reference 路径为空")
     return Config(
         input_path=options["input"],
         output_dir=options["output_dir"],
@@ -129,6 +135,7 @@ def _build_analyze_config(options: dict) -> Config:
         stability_seed=_parse_int(
             "--stability-seed", options["stability_seed"]
         ),
+        cell_type_reference_path=cell_type_reference_path,
     )
 
 
@@ -165,6 +172,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--stability-n-samples": "stability_n_samples",
         "--stability-sample-fraction": "stability_sample_fraction",
         "--stability-seed": "stability_seed",
+        "--cell-type-reference": "cell_type_reference",
     }
     # 无值开关参数；--detect-doublets=x 形式按未知参数拒绝
     flag_options = {

@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .errors import OutputPathError
 from .batch import BatchSummaryRow
 from .cell_metadata import CellBatchReport
+from .cell_types import CellTypeAnnotation
 from .doublets import DoubletResult
 from .gene_sets import GeneSetScores
 from .kmeans import KMeansResult
@@ -72,6 +73,7 @@ class Artifacts:
     pseudobulk: Optional[PseudobulkData] = None
     doublets: Optional[DoubletResult] = None
     stability: Optional[StabilityResult] = None
+    cell_type_annotation: Optional[CellTypeAnnotation] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -704,6 +706,77 @@ def _doublet_score_chart_tsv(result: DoubletResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _cluster_annotations_tsv(annotation: CellTypeAnnotation) -> str:
+    """按 cluster 升序的逐簇注释结果；score 用最短往返表示。"""
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "n_cells",
+                "cell_type",
+                "annotation_status",
+                "score",
+                "n_markers_total",
+                "n_markers_used",
+            ]
+        )
+    ]
+    for r in annotation.rows:
+        lines.append(
+            tsv_row(
+                [
+                    r.cluster,
+                    r.n_cells,
+                    r.cell_type,
+                    r.status,
+                    fmt_float(r.score),
+                    r.n_markers_total,
+                    r.n_markers_used,
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _cluster_annotation_chart_tsv(
+    annotation: CellTypeAnnotation,
+    pca: PCAResult,
+    clustering: KMeansResult,
+) -> str:
+    """逐细胞注释图表：行列口径同 pca_scatter.tsv，追加注释三列。"""
+    lines = [
+        tsv_row(
+            [
+                "cell_id",
+                "PC1",
+                "PC2",
+                "cluster",
+                "cell_type",
+                "annotation_status",
+                "score",
+            ]
+        )
+    ]
+    for c, cell_id in enumerate(pca.cell_ids):
+        pc1 = pca.scores[c][0] if pca.n_pcs >= 1 else 0.0
+        pc2 = pca.scores[c][1] if pca.n_pcs >= 2 else 0.0
+        row = annotation.by_cluster[clustering.labels[c]]
+        lines.append(
+            tsv_row(
+                [
+                    cell_id,
+                    fmt_float(pc1),
+                    fmt_float(pc2),
+                    clustering.labels[c],
+                    row.cell_type,
+                    row.status,
+                    fmt_float(row.score),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _run_json(run_info: Dict[str, Any]) -> str:
     return json.dumps(run_info, indent=2, ensure_ascii=False) + "\n"
 
@@ -1020,6 +1093,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         # 仅 --detect-doublets 运行产出双细胞评分产物；未启用时文件集不变
         final_names.append("doublet_scores.tsv")
         final_names.append("doublet_score_chart.tsv")
+    if artifacts.cell_type_annotation is not None:
+        # 仅 --cell-type-reference 运行产出细胞类型注释；未提供时文件集与基线一致
+        final_names.append("cluster_annotations.tsv")
+        final_names.append("cluster_annotation_chart.tsv")
     stability_payload: List[Tuple[str, str]] = []
     if artifacts.stability is not None:
         # 仅 --stability-analysis 运行产出三个稳定性文件；未启用时文件集不变
@@ -1158,6 +1235,23 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             (
                 "doublet_score_chart.tsv",
                 _doublet_score_chart_tsv(artifacts.doublets),
+            )
+        )
+    if artifacts.cell_type_annotation is not None:
+        payload.append(
+            (
+                "cluster_annotations.tsv",
+                _cluster_annotations_tsv(artifacts.cell_type_annotation),
+            )
+        )
+        payload.append(
+            (
+                "cluster_annotation_chart.tsv",
+                _cluster_annotation_chart_tsv(
+                    artifacts.cell_type_annotation,
+                    artifacts.pca,
+                    artifacts.clustering,
+                ),
             )
         )
     payload.extend(stability_payload)
