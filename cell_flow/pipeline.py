@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Union
 
 from . import __version__
+from .abundance import DifferentialAbundance, compute_differential_abundance
 from .batch import BatchSummaryRow, read_batch_metadata
 from .cell_metadata import (
     DEFAULT_BATCH_COLUMN,
@@ -86,6 +87,7 @@ class Config:
     enrichment_alpha: float = 0.05
     enrichment_min_log_fc: float = 0.0
     pseudobulk_gene_set_de: bool = False
+    differential_abundance: bool = False
 
     @property
     def auto_clusters(self) -> bool:
@@ -136,6 +138,9 @@ class Config:
             parameters["enrich_markers"] = True
             parameters["enrichment_alpha"] = self.enrichment_alpha
             parameters["enrichment_min_log_fc"] = self.enrichment_min_log_fc
+        if self.differential_abundance:
+            # 仅显式启用簇级样本差异丰度时记录；未启用时与基线一致
+            parameters["differential_abundance"] = True
         return parameters
 
 
@@ -205,6 +210,11 @@ def validate_config(config: Config) -> None:
             "--pseudobulk-gene-set-de 需与 --gene-sets、"
             "--replicate-metadata 同时使用"
         )
+    if not isinstance(config.differential_abundance, bool):
+        errors.append("--differential-abundance 必须是无值开关参数")
+    if config.differential_abundance and config.replicate_metadata_path is None:
+        # 簇级样本差异丰度建立在 --replicate-metadata 样本分组基线上
+        errors.append("--differential-abundance 需与 --replicate-metadata 同时使用")
     if config.cell_metadata_path is not None:
         if config.batch_metadata_path is not None:
             errors.append("--cell-metadata 与 --batch-metadata 不能同时使用")
@@ -549,6 +559,21 @@ def run(config: Config) -> List[str]:
     if replicate_metadata is not None:
         pseudobulk = build_pseudobulk(matrix, analysis_qc, replicate_metadata)
 
+    # 簇级样本差异丰度：只用质控后保留细胞、最终簇标签与样本分组，
+    # 以样本为观测对簇比例做分组 Welch t/BH。仅在 --differential-abundance
+    # （必带 --replicate-metadata）时执行；质控后样本空、group 不足两个或
+    # 任一 group 重复不足两个已由上方 build_pseudobulk 报数据错误（退出码 4）
+    differential_abundance: Optional[DifferentialAbundance] = None
+    if config.differential_abundance:
+        assert replicate_metadata is not None and pseudobulk is not None
+        cell_samples = [
+            replicate_metadata.samples[matrix.cell_ids[c]]
+            for c in analysis_qc.kept_cells
+        ]
+        differential_abundance = compute_differential_abundance(
+            clustering.labels, cell_samples, pseudobulk
+        )
+
     # pseudobulk 基因集分组差异：在 pseudobulk log1p 值上按集合（与保留基因
     # 交集）给样本评分，再以样本为观测做分组 Welch t/BH。仅在
     # --pseudobulk-gene-set-de（必带 --gene-sets 与 --replicate-metadata）
@@ -820,6 +845,19 @@ def run(config: Config) -> List[str]:
             "test_count": n_pbgs_comparisons * n_pbgs_sets,
             "min_p_value_adj": min(adjusted_values),
         }
+    if differential_abundance is not None:
+        # 簇级样本差异丰度汇总：样本数、簇数、比较数与全部检验中的最小
+        # 校正 P 值；仅显式启用时出现，既有字段不变
+        run_info["differential_abundance"] = {
+            "sample_count": len(differential_abundance.sample_ids),
+            "cluster_count": len(differential_abundance.clusters),
+            "comparison_count": len(differential_abundance.comparisons),
+            "min_p_value_adj": min(
+                record.p_value_adj
+                for _, _, _, records in differential_abundance.comparisons
+                for record in records
+            ),
+        }
 
     artifacts = Artifacts(
         qc=qc,
@@ -840,6 +878,7 @@ def run(config: Config) -> List[str]:
         cell_type_annotations=cell_type_annotations,
         marker_enrichment=marker_enrichment,
         pseudobulk_gene_set_scores=pseudobulk_gene_set_scores,
+        differential_abundance=differential_abundance,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

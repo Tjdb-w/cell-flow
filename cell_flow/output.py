@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .errors import OutputPathError
+from .abundance import DifferentialAbundance
 from .batch import BatchSummaryRow
 from .cell_metadata import CellBatchReport
 from .cell_types import CellTypeAnnotations
@@ -78,6 +79,7 @@ class Artifacts:
     cell_type_annotations: Optional[CellTypeAnnotations] = None
     marker_enrichment: Optional[MarkerEnrichment] = None
     pseudobulk_gene_set_scores: Optional[PseudobulkGeneSetScores] = None
+    differential_abundance: Optional[DifferentialAbundance] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -728,6 +730,126 @@ def _pseudobulk_gene_set_chart_tsv(scores: PseudobulkGeneSetScores) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _cluster_abundance_tsv(abundance: DifferentialAbundance) -> str:
+    """样本 × 簇全组合的丰度表：按 sample_id、cluster 升序（统计模块已定序）。
+
+    proportion 为该样本保留细胞中属于该簇的比例（n_cells / total_cells），
+    样本中不属于该簇时 n_cells 计 0。
+    """
+    lines = [
+        tsv_row(
+            [
+                "sample_id",
+                "group",
+                "cluster",
+                "n_cells",
+                "total_cells",
+                "proportion",
+            ]
+        )
+    ]
+    for r in abundance.rows:
+        lines.append(
+            tsv_row(
+                [
+                    r.sample_id,
+                    r.group,
+                    r.cluster,
+                    r.n_cells,
+                    r.total_cells,
+                    fmt_float(r.proportion),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _cluster_differential_abundance_tsv(abundance: DifferentialAbundance) -> str:
+    """簇级样本差异丰度：沿用分组差异布局，cluster 取代 gene_id、
+    proportion_difference_a_vs_b 取代 log_fc_a_vs_b。
+
+    比较先全部 one-vs-rest（group 升序，group_b 为空）再全部 pairwise；
+    每个比较内记录按校正 P 值升序、差异值降序、cluster 升序排列
+    （统计模块已定序）。
+    """
+    lines = [
+        tsv_row(
+            [
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "cluster",
+                "mean_in_a",
+                "mean_in_b",
+                "proportion_difference_a_vs_b",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for _, _, _, records in abundance.comparisons:
+        for r in records:
+            lines.append(
+                tsv_row(
+                    [
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        r.cluster,
+                        fmt_float(r.mean_in_a),
+                        fmt_float(r.mean_in_b),
+                        fmt_float(r.difference),
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _cluster_abundance_chart_tsv(abundance: DifferentialAbundance) -> str:
+    """每簇按比例降序、样本升序取前 20 个样本，rank 自 1 起逐簇编号；
+    其余列沿用 cluster_abundance.tsv。"""
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "rank",
+                "sample_id",
+                "group",
+                "n_cells",
+                "total_cells",
+                "proportion",
+            ]
+        )
+    ]
+    rows_by_cluster: Dict[int, List[Any]] = {}
+    for r in abundance.rows:
+        rows_by_cluster.setdefault(r.cluster, []).append(r)
+    for cluster in sorted(rows_by_cluster):
+        top = sorted(
+            rows_by_cluster[cluster],
+            key=lambda r: (-r.proportion, r.sample_id),
+        )[:TOP_N_MARKERS]
+        for rank, r in enumerate(top, start=1):
+            lines.append(
+                tsv_row(
+                    [
+                        cluster,
+                        rank,
+                        r.sample_id,
+                        r.group,
+                        r.n_cells,
+                        r.total_cells,
+                        fmt_float(r.proportion),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
 def _normalized_expression_tsv(data: NormalizedData) -> str:
     """质控后保留基因（原行序）× 保留细胞（原列序）的 log 归一化表达。
 
@@ -1335,6 +1457,12 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         final_names.append("pseudobulk_gene_set_score_chart.tsv")
         final_names.append("pseudobulk_gene_set_de.tsv")
         final_names.append("pseudobulk_gene_set_chart.tsv")
+    if artifacts.differential_abundance is not None:
+        # 仅 --differential-abundance（必带 --replicate-metadata）运行产出
+        # 簇级样本差异丰度产物；未启用时文件集不变
+        final_names.append("cluster_abundance.tsv")
+        final_names.append("cluster_differential_abundance.tsv")
+        final_names.append("cluster_abundance_chart.tsv")
     if artifacts.doublets is not None:
         # 仅 --detect-doublets 运行产出双细胞评分产物；未启用时文件集不变
         final_names.append("doublet_scores.tsv")
@@ -1516,6 +1644,27 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                 _pseudobulk_gene_set_chart_tsv(
                     artifacts.pseudobulk_gene_set_scores
                 ),
+            )
+        )
+    if artifacts.differential_abundance is not None:
+        payload.append(
+            (
+                "cluster_abundance.tsv",
+                _cluster_abundance_tsv(artifacts.differential_abundance),
+            )
+        )
+        payload.append(
+            (
+                "cluster_differential_abundance.tsv",
+                _cluster_differential_abundance_tsv(
+                    artifacts.differential_abundance
+                ),
+            )
+        )
+        payload.append(
+            (
+                "cluster_abundance_chart.tsv",
+                _cluster_abundance_chart_tsv(artifacts.differential_abundance),
             )
         )
     if artifacts.doublets is not None:

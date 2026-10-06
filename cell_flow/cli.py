@@ -12,7 +12,7 @@
         [--detect-doublets] [--expected-doublet-rate 0.08] \\
         [--cell-type-reference <标记参考.tsv>] \\
         [--enrich-markers] [--enrichment-alpha F] [--enrichment-min-log-fc F] \\
-        [--pseudobulk-gene-set-de] \\
+        [--pseudobulk-gene-set-de] [--differential-abundance] \\
         [--stability-analysis] [--stability-n-samples 100] \\
         [--stability-sample-fraction 0.8] [--stability-seed 20240617]
 """
@@ -44,7 +44,7 @@ USAGE = (
     "                [--cell-type-reference <标记参考.tsv>]\n"
     "                [--enrich-markers] [--enrichment-alpha F]\n"
     "                [--enrichment-min-log-fc F]\n"
-    "                [--pseudobulk-gene-set-de]\n"
+    "                [--pseudobulk-gene-set-de] [--differential-abundance]\n"
     "                [--stability-analysis] [--stability-n-samples N]\n"
     "                [--stability-sample-fraction F] [--stability-seed N]\n"
     "      cell-flow --version"
@@ -150,6 +150,7 @@ def _build_analyze_config(options: dict) -> Config:
             "--enrichment-min-log-fc", options["enrichment_min_log_fc"]
         ),
         pseudobulk_gene_set_de=bool(options.get("pseudobulk_gene_set_de")),
+        differential_abundance=bool(options.get("differential_abundance")),
     )
 
 
@@ -196,6 +197,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--stability-analysis": "stability_analysis",
         "--enrich-markers": "enrich_markers",
         "--pseudobulk-gene-set-de": "pseudobulk_gene_set_de",
+        "--differential-abundance": "differential_abundance",
     }
     options = {
         "input_format": "tsv",
@@ -273,6 +275,15 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         raise _fail_usage(
             "--pseudobulk-gene-set-de 需与 --gene-sets、"
             "--replicate-metadata 同时使用"
+        )
+
+    if options.get("differential_abundance") and options.get(
+        "replicate_metadata"
+    ) is None:
+        # 簇级样本差异丰度只在 --replicate-metadata 样本分组基线上启用；
+        # 无值开关带值（--flag=x）已在上方按未知参数拒绝
+        raise _fail_usage(
+            "--differential-abundance 需与 --replicate-metadata 同时使用"
         )
 
     enrichment_param_keys = ("enrichment_alpha", "enrichment_min_log_fc")
