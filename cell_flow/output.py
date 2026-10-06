@@ -23,6 +23,7 @@ from .errors import OutputPathError
 from .batch import BatchSummaryRow
 from .cell_metadata import CellBatchReport
 from .cell_types import CellTypeAnnotations
+from .differential_abundance import ClusterAbundanceResult
 from .doublets import DoubletResult
 from .enrichment import MarkerEnrichment
 from .gene_sets import GeneSetScores
@@ -78,6 +79,7 @@ class Artifacts:
     cell_type_annotations: Optional[CellTypeAnnotations] = None
     marker_enrichment: Optional[MarkerEnrichment] = None
     pseudobulk_gene_set_scores: Optional[PseudobulkGeneSetScores] = None
+    cluster_abundance: Optional[ClusterAbundanceResult] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -728,6 +730,130 @@ def _pseudobulk_gene_set_chart_tsv(scores: PseudobulkGeneSetScores) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _cluster_abundance_tsv(result: ClusterAbundanceResult) -> str:
+    """样本 × 簇全组合的细胞丰度，按 sample_id、cluster 升序。
+
+    列为 sample_id、group、cluster、n_cells、total_cells、proportion；
+    缺簇计 0，total_cells 为该样本保留细胞总数，proportion 为两者之商。
+    """
+    lines = [
+        tsv_row(
+            [
+                "sample_id",
+                "group",
+                "cluster",
+                "n_cells",
+                "total_cells",
+                "proportion",
+            ]
+        )
+    ]
+    for r in result.rows:
+        lines.append(
+            tsv_row(
+                [
+                    r.sample_id,
+                    r.group,
+                    r.cluster,
+                    r.n_cells,
+                    r.total_cells,
+                    fmt_float(r.proportion),
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _cluster_differential_abundance_tsv(result: ClusterAbundanceResult) -> str:
+    """逐比较的簇比例 Welch t 差异结果，one-vs-rest 后两两（组名升序）。
+
+    列为 comparison_type、group_a、group_b、cluster、mean_in_a、mean_in_b、
+    proportion_difference_a_vs_b、t_stat、p_value、p_value_adj；
+    one-vs-rest 的 group_b 为空。比较内记录由统计模块按 p_value_adj 升序、
+    差异值降序、cluster 升序定序。
+    """
+    lines = [
+        tsv_row(
+            [
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "cluster",
+                "mean_in_a",
+                "mean_in_b",
+                "proportion_difference_a_vs_b",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for _, _, _, records in result.comparisons:
+        for r in records:
+            lines.append(
+                tsv_row(
+                    [
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        r.cluster,
+                        fmt_float(r.mean_in_a),
+                        fmt_float(r.mean_in_b),
+                        fmt_float(r.proportion_difference_a_vs_b),
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _cluster_abundance_chart_tsv(result: ClusterAbundanceResult) -> str:
+    """每簇按比例降序、sample_id 升序取前 20 个样本。
+
+    rank 自 1 起在每个簇内单独编号，其余列沿用 cluster_abundance.tsv。
+    """
+    by_cluster: Dict[int, List[Any]] = {
+        cluster: [] for cluster in result.cluster_ids
+    }
+    for r in result.rows:
+        by_cluster[r.cluster].append(r)
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "rank",
+                "sample_id",
+                "group",
+                "n_cells",
+                "total_cells",
+                "proportion",
+            ]
+        )
+    ]
+    for cluster in result.cluster_ids:
+        ranked = sorted(
+            by_cluster[cluster],
+            key=lambda r: (-r.proportion, r.sample_id),
+        )
+        for rank, r in enumerate(ranked[:TOP_N_MARKERS], start=1):
+            lines.append(
+                tsv_row(
+                    [
+                        cluster,
+                        rank,
+                        r.sample_id,
+                        r.group,
+                        r.n_cells,
+                        r.total_cells,
+                        fmt_float(r.proportion),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
 def _normalized_expression_tsv(data: NormalizedData) -> str:
     """质控后保留基因（原行序）× 保留细胞（原列序）的 log 归一化表达。
 
@@ -1335,6 +1461,12 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         final_names.append("pseudobulk_gene_set_score_chart.tsv")
         final_names.append("pseudobulk_gene_set_de.tsv")
         final_names.append("pseudobulk_gene_set_chart.tsv")
+    if artifacts.cluster_abundance is not None:
+        # 仅 --differential-abundance（必带 --replicate-metadata）运行产出
+        # 簇级样本差异丰度产物；未启用时文件集不变
+        final_names.append("cluster_abundance.tsv")
+        final_names.append("cluster_differential_abundance.tsv")
+        final_names.append("cluster_abundance_chart.tsv")
     if artifacts.doublets is not None:
         # 仅 --detect-doublets 运行产出双细胞评分产物；未启用时文件集不变
         final_names.append("doublet_scores.tsv")
@@ -1516,6 +1648,25 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                 _pseudobulk_gene_set_chart_tsv(
                     artifacts.pseudobulk_gene_set_scores
                 ),
+            )
+        )
+    if artifacts.cluster_abundance is not None:
+        payload.append(
+            (
+                "cluster_abundance.tsv",
+                _cluster_abundance_tsv(artifacts.cluster_abundance),
+            )
+        )
+        payload.append(
+            (
+                "cluster_differential_abundance.tsv",
+                _cluster_differential_abundance_tsv(artifacts.cluster_abundance),
+            )
+        )
+        payload.append(
+            (
+                "cluster_abundance_chart.tsv",
+                _cluster_abundance_chart_tsv(artifacts.cluster_abundance),
             )
         )
     if artifacts.doublets is not None:

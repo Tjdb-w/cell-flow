@@ -18,7 +18,9 @@
 marker 基因集富集通过 `--enrich-markers` 开关（仅在 `--gene-sets` 基线上
 生效）与 `--enrichment-alpha`、`--enrichment-min-log-fc` 控制；
 pseudobulk 基因集分组差异通过 `--pseudobulk-gene-set-de` 无值开关启用
-（仅在同时提供 `--gene-sets` 与 `--replicate-metadata` 时生效）。
+（仅在同时提供 `--gene-sets` 与 `--replicate-metadata` 时生效）；
+簇级样本差异丰度通过 `--differential-abundance` 无值开关启用（仅在提供
+`--replicate-metadata` 时生效）。
 `--key value` 与 `--key=value` 两种写法均支持。跨样本批次校正见下文
 `--cell-metadata`。
 
@@ -301,6 +303,52 @@ SHA-256、质控前各样体细胞数（`sample_sizes`，按输入细胞首次�
 报数据错误（退出码 4）；目录非空或暂存、写出、发布失败报
 `OutputPathError`（退出码 5），任何失败都不创建或改动结果目录。
 浮点格式沿用既有最短往返表示；相同输入、配置与种子下新增输出逐字节一致。
+
+### `--differential-abundance`（可选，簇级样本差异丰度）
+
+`--differential-abundance` 是无值开关，只在提供 `--replicate-metadata` 时
+可用：未提供该基线参数即启用开关，或把开关写成带值形式（如
+`--differential-abundance=true`），或取值参数缺值、出现未知参数，一律报
+配置错误（退出码 3）。`--replicate-metadata` 的文件格式、gzip 识别、
+覆盖与分组约束完全沿用其当前语义；未启用本开关时，全部结果文件与
+`run.json` 与基线逐字节一致。
+
+分析只用质控后保留的细胞（启用 `--detect-doublets` 时为双细胞过滤后的
+最终细胞）、最终簇标签与重复元数据给出的样本分组，不重新聚类：
+
+- 对每个样本统计其保留细胞在每个最终簇上的细胞数 `n_cells`（样本中缺簇
+  计 0）、该样本保留细胞总数 `total_cells`，以及比例
+  `proportion = n_cells / total_cells`，覆盖样本 × 簇的全部组合。
+- 以样本为观测单位，对每个 group 先做 one-vs-rest（rest 为该组之外的
+  全部样本），再按 group 升序两两比较；对每个簇的样本比例执行双侧
+  Welch t 检验，差异值 `proportion_difference_a_vs_b` 为 a 组比例均值减
+  b 组比例均值，BH 校正以单个比较内的全部簇为一个校正家族。两组方差均为
+  0 且均值相同时 `t_stat = 0`、`p_value = 1`（均值不同时为 `inf`/0）。
+
+启用时在既有结果之外新增三个文件（其余文件与不启用时逐字节一致，
+`run.json` 除外）：
+
+- `cluster_abundance.tsv`：样本 × 簇全组合，列为 `sample_id`、`group`、
+  `cluster`、`n_cells`、`total_cells`、`proportion`，按 `sample_id`、
+  `cluster` 升序排列。
+- `cluster_differential_abundance.tsv`：列为 `comparison_type`、
+  `group_a`、`group_b`（one-vs-rest 时为空）、`cluster`、`mean_in_a`、
+  `mean_in_b`、`proportion_difference_a_vs_b`、`t_stat`、`p_value`、
+  `p_value_adj`；比较先全部 one-vs-rest（group 升序）再全部 pairwise
+  （group 升序），每个比较内按 `p_value_adj` 升序、差异值降序、
+  `cluster` 升序排列。
+- `cluster_abundance_chart.tsv`：按簇升序，每簇按比例降序、`sample_id`
+  升序取前 20 个样本；列为 `cluster`、`rank`（自 1 起、每簇内单独编号）、
+  `sample_id`、`group`、`n_cells`、`total_cells`、`proportion`。
+
+`run.json` 的 `parameters` 增加 `"differential_abundance": true`；新增顶层
+`differential_abundance` 汇总，含 `sample_count`、`cluster_count`、
+`comparison_count` 与 `min_p_value_adj`（全部簇检验中的最小校正 P 值）。
+质控后某样本无保留细胞、非空 group 不足两个或任一 group 有效重复不足两个，
+报数据错误（退出码 4）；目录非空或暂存、写出、发布失败报
+`OutputPathError`（退出码 5），任何失败都不创建或改动结果目录。浮点格式
+沿用既有最短往返表示；相同输入、配置与种子下三个新增 TSV 与 `run.json`
+逐字节一致。
 
 ### `--detect-doublets` / `--expected-doublet-rate`（可选，双细胞识别与过滤）
 
