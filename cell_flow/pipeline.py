@@ -7,6 +7,10 @@ from typing import Any, Dict, List, Optional, Union
 from . import __version__
 from .abundance import DifferentialAbundance, compute_differential_abundance
 from .batch import BatchSummaryRow, read_batch_metadata
+from .cluster_pseudobulk import (
+    ClusterPseudobulkDE,
+    compute_cluster_pseudobulk_de,
+)
 from .cell_metadata import (
     DEFAULT_BATCH_COLUMN,
     DEFAULT_SAMPLE_COLUMN,
@@ -88,6 +92,7 @@ class Config:
     enrichment_min_log_fc: float = 0.0
     pseudobulk_gene_set_de: bool = False
     differential_abundance: bool = False
+    cluster_pseudobulk_de: bool = False
 
     @property
     def auto_clusters(self) -> bool:
@@ -141,6 +146,9 @@ class Config:
         if self.differential_abundance:
             # 仅显式启用簇级样本差异丰度时记录；未启用时与基线一致
             parameters["differential_abundance"] = True
+        if self.cluster_pseudobulk_de:
+            # 仅显式启用最终簇内 pseudobulk 差异表达时记录；未启用时与基线一致
+            parameters["cluster_pseudobulk_de"] = True
         return parameters
 
 
@@ -215,6 +223,11 @@ def validate_config(config: Config) -> None:
     if config.differential_abundance and config.replicate_metadata_path is None:
         # 簇级样本差异丰度建立在 --replicate-metadata 样本分组基线上
         errors.append("--differential-abundance 需与 --replicate-metadata 同时使用")
+    if not isinstance(config.cluster_pseudobulk_de, bool):
+        errors.append("--cluster-pseudobulk-de 必须是无值开关参数")
+    if config.cluster_pseudobulk_de and config.replicate_metadata_path is None:
+        # 最终簇内 pseudobulk 差异表达建立在 --replicate-metadata 样本分组基线上
+        errors.append("--cluster-pseudobulk-de 需与 --replicate-metadata 同时使用")
     if config.cell_metadata_path is not None:
         if config.batch_metadata_path is not None:
             errors.append("--cell-metadata 与 --batch-metadata 不能同时使用")
@@ -583,6 +596,26 @@ def run(config: Config) -> List[str]:
         assert gene_sets is not None and pseudobulk is not None
         pseudobulk_gene_set_scores = score_pseudobulk_gene_sets(gene_sets, pseudobulk)
 
+    # 最终簇内 pseudobulk 差异表达：对每个最终簇，只汇总该簇内通过质控的
+    # 保留细胞在保留基因上的原始计数，簇内样本文库归一到 10000 后 log1p，
+    # 以样本为观测做分组 Welch t/BH。仅在 --cluster-pseudobulk-de（必带
+    # --replicate-metadata）时执行；某簇 group 不足两个或任一组有效样本不足
+    # 两个则跳过，全部簇都不可检验在此报数据错误（退出码 4），不触碰输出目录。
+    cluster_pseudobulk: Optional[ClusterPseudobulkDE] = None
+    if config.cluster_pseudobulk_de:
+        assert replicate_metadata is not None and pseudobulk is not None
+        cluster_cell_samples = [
+            replicate_metadata.samples[matrix.cell_ids[c]]
+            for c in analysis_qc.kept_cells
+        ]
+        cluster_pseudobulk = compute_cluster_pseudobulk_de(
+            matrix,
+            analysis_qc,
+            clustering.labels,
+            cluster_cell_samples,
+            pseudobulk,
+        )
+
     # 批次汇总：按 batch 升序，后三项为批次内保留细胞均值
     batch_summary: Optional[List[BatchSummaryRow]] = None
     if batch_metadata is not None or cell_metadata is not None:
@@ -858,6 +891,16 @@ def run(config: Config) -> List[str]:
                 for record in records
             ),
         }
+    if cluster_pseudobulk is not None:
+        # 最终簇内 pseudobulk 差异表达汇总：已检验/跳过簇、比较数、检验数
+        # （比较数 × 保留基因数）与全部检验中的最小校正 P 值；仅显式启用时出现
+        run_info["cluster_pseudobulk_de"] = {
+            "clusters_tested": list(cluster_pseudobulk.clusters_tested),
+            "clusters_skipped": list(cluster_pseudobulk.clusters_skipped),
+            "comparison_count": cluster_pseudobulk.comparison_count,
+            "test_count": cluster_pseudobulk.test_count,
+            "min_p_value_adj": cluster_pseudobulk.min_p_value_adj,
+        }
 
     artifacts = Artifacts(
         qc=qc,
@@ -879,6 +922,7 @@ def run(config: Config) -> List[str]:
         marker_enrichment=marker_enrichment,
         pseudobulk_gene_set_scores=pseudobulk_gene_set_scores,
         differential_abundance=differential_abundance,
+        cluster_pseudobulk=cluster_pseudobulk,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

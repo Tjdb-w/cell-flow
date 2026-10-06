@@ -20,7 +20,9 @@ marker 基因集富集通过 `--enrich-markers` 开关（仅在 `--gene-sets` �
 pseudobulk 基因集分组差异通过 `--pseudobulk-gene-set-de` 无值开关启用
 （仅在同时提供 `--gene-sets` 与 `--replicate-metadata` 时生效）；
 簇级样本差异丰度通过 `--differential-abundance` 无值开关启用
-（仅在提供 `--replicate-metadata` 时生效）。
+（仅在提供 `--replicate-metadata` 时生效）；
+最终簇内按生物学重复的 pseudobulk 差异表达通过 `--cluster-pseudobulk-de`
+无值开关启用（仅在提供 `--replicate-metadata` 时生效）。
 `--key value` 与 `--key=value` 两种写法均支持。跨样本批次校正见下文
 `--cell-metadata`。
 
@@ -347,6 +349,54 @@ group 不足两个或任一 group 有效重复不足两个报数据错误（退�
 `OutputPathError`（退出码 5），任何失败都不创建或改动结果目录。
 浮点格式沿用既有最短往返表示；相同输入、配置与种子下新增输出
 逐字节一致。
+
+### `--cluster-pseudobulk-de`（可选，最终簇内按生物学重复的 pseudobulk 差异表达）
+
+`--cluster-pseudobulk-de` 是无值开关，只在提供 `--replicate-metadata`
+时可用：缺少该基线参数即启用开关，或把开关写成带值形式（如
+`--cluster-pseudobulk-de=true`），一律报配置错误（退出码 3）。
+`--replicate-metadata` 缺值、空路径或调用不合法同为配置错误（退出码 3）；
+重复元数据的结构、覆盖、ID、同一样本多分组与 gzip 问题沿用
+`--replicate-metadata` 基线语义报输入错误（退出码 2）。未启用时，全部结果
+文件与 `run.json` 与基线逐字节一致。
+
+分析在既有质控、归一化、聚类（及批次校正等）完成后，只使用通过质控的
+保留细胞、保留基因与最终簇标签：对每个最终簇和样本，只汇总**该簇内**
+通过质控的保留细胞在保留基因上的**原始计数**；无细胞的（簇, 样本）组合
+不纳入、也不补零。每个簇的样本文库总计数按该样本在**该簇内**、保留基因
+上的计数和计算，归一到 10000 后取 log1p。以样本为观测单位对 `group` 做
+分组差异：每个 group 先 one-vs-rest（`group_b` 为空，rest 为该组之外该簇
+内的全部有效样本），再按 group 升序两两比较；检验为双侧 Welch t，
+`log_fc_a_vs_b` 为均值差，Benjamini-Hochberg 校正以**每个簇的每项比较内
+的全部保留基因**为一个校正家族。
+
+某簇仅在至少有两个 group、且每个 group 至少有两个含保留细胞的有效样本时
+才进入分析；不满足的簇跳过（不报错、不补零）。没有任何可检验簇时报
+`CellFlowDataError`（退出码 4），且不创建或改动结果目录。启用时在既有
+结果之外新增两个文件（其余文件与不启用时逐字节一致，`run.json` 除外）：
+
+- `cluster_pseudobulk_de.tsv`：列为 `cluster`、`comparison_type`、
+  `group_a`、`group_b`（one-vs-rest 时为空）、`gene_id`、`mean_in_a`、
+  `mean_in_b`、`log_fc_a_vs_b`、`t_stat`、`p_value`、`p_value_adj`，
+  统计列沿用 marker 结果的名称与语义。行按 `cluster` 升序，每簇先全部
+  one-vs-rest（group 升序）再全部 pairwise（group 升序）；每项比较内按
+  校正 P 值升序、`log_fc_a_vs_b` 降序、`gene_id` 升序排列。
+- `cluster_pseudobulk_de_chart.tsv`：沿用同一簇与比较顺序，每项比较取
+  前 20 个基因，在 `group_b` 之后加入自 1 起、每项比较内单独编号的
+  `rank`，列为 `cluster`、`comparison_type`、`group_a`、`group_b`、
+  `rank`、`gene_id`、`log_fc_a_vs_b`、`p_value`、`p_value_adj`、
+  `neg_log10_p_adj`（末列）。
+
+`run.json` 的 `parameters` 增加 `"cluster_pseudobulk_de": true`；新增顶层
+`cluster_pseudobulk_de` 汇总，含 `clusters_tested`（已检验簇，升序）、
+`clusters_skipped`（跳过簇，升序）、`comparison_count`（各已检验簇比较数
+之和）、`test_count`（比较数 × 保留基因数）与 `min_p_value_adj`（全部检验
+中的最小校正 P 值）。该开关可与 `--metadata`、`--batch-metadata`、
+`--cell-metadata`、`--gene-sets`、`--pseudobulk-gene-set-de`、
+`--differential-abundance`、`--detect-doublets`、`--stability-analysis`
+并用，不改变它们的结果与口径。浮点格式沿用既有最短往返表示；相同输入、
+配置与种子下内容、排序与浮点文本逐字节一致；目录非空或暂存、写出、发布
+失败报 `OutputPathError`（退出码 5），任何失败都不创建或改动结果目录。
 
 ### `--detect-doublets` / `--expected-doublet-rate`（可选，双细胞识别与过滤）
 
