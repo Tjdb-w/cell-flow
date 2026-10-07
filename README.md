@@ -30,8 +30,13 @@ pseudobulk 基因集分组差异通过 `--pseudobulk-gene-set-de` 无值开关�
 `--replicate-metadata` 与 `--cluster-pseudobulk-de` 时生效）；
 按样本协变量校正的簇内 pseudobulk 差异表达通过
 `--cluster-pseudobulk-adjusted-de` 无值开关启用，并以
-`--pseudobulk-covariates` 指定协变量表（两者仅在同时提供
-`--replicate-metadata` 与 `--cluster-pseudobulk-de` 时生效）。
+`--pseudobulk-covariates` 指定分类协变量表（两者仅在同时提供
+`--replicate-metadata` 与 `--cluster-pseudobulk-de` 时生效）；
+数值型样本协变量的独立检验以
+`--pseudobulk-numeric-covariates` 指定，同样仅在同时提供
+`--replicate-metadata`、`--cluster-pseudobulk-de` 并启用
+`--cluster-pseudobulk-adjusted-de` 时生效，可与 `--pseudobulk-covariates`
+并用。
 `--key value` 与 `--key=value` 两种写法均支持。跨样本批次校正见下文
 `--cell-metadata`。
 
@@ -515,6 +520,70 @@ Benjamini-Hochberg 校正。设计矩阵秩不足或残差自由度不大于零�
 发布失败报 `OutputPathError`（退出码 5），任何失败都不创建或改动结果
 目录。浮点格式沿用既有最短往返表示；相同输入、配置与 seed 下内容、
 排序、浮点文本与 `run.json` 逐字节一致。
+
+### `--pseudobulk-numeric-covariates`（可选，簇内 pseudobulk 数值协变量独立检验）
+
+`--pseudobulk-numeric-covariates <路径>`（`--key value` 与 `--key=value`
+均可）取数值型样本协变量表；它只在同时提供 `--replicate-metadata`、
+`--cluster-pseudobulk-de` 并启用 `--cluster-pseudobulk-adjusted-de` 时
+有效，可与 `--pseudobulk-covariates`（分类协变量表）并用。缺少任一基线
+即给出该路径、或把它写成 `--flag=x` 以外的非法形式、参数重复出现、
+`--pseudobulk-numeric-covariates=` 空路径，一律报配置错误（退出码 3）。
+启用 `--cluster-pseudobulk-adjusted-de` 时须至少提供分类或数值协变量表
+之一。仅给出 `--pseudobulk-numeric-covariates` 而不启用校正开关、或缺
+`--cluster-pseudobulk-de`/`--replicate-metadata` 都属配置错误。未提供
+该路径时，全部结果文件与 `run.json` 与基线逐字节一致。
+
+数值协变量表为 UTF-8 制表符文本或单成员 gzip（按 gzip 魔数识别，与文件名
+无关），首列恰为 `sample_id`，另有至少一个唯一命名的数值列；每个
+`--replicate-metadata` 样本恰好一行，`sample_id` 唯一，全部字段非空，
+样本集合与重复元数据完全一致（不多不少），每个取值都必须能解析为有限
+float64（`nan`/`inf`/`-inf`/空串/非数值文本均非法）。文件不存在或不可读、
+表头不符、数值列缺失或命名重复、列数不符、空字段、样本重复、未覆盖全部
+重复样本、出现重复元数据之外的样本、取值为空或非有限数值，或 gzip 多
+成员、尾随数据、截断、校验失败，一律报输入错误（退出码 2）。
+
+分析沿用簇内 pseudobulk 的保留范围、计数汇总、文库归一化与簇/比较枚举
+次序（簇升序，每簇先 one-vs-rest 再按 group 升序两两比较），是对
+`cluster_pseudobulk_de.tsv`（Welch）与
+`cluster_pseudobulk_adjusted_de.tsv`（分类校正）的独立补充，不改写
+它们。每个簇与每项比较只用该簇内的有效样本（两两比较只用两个目标 group
+的样本），以样本为观测对每个保留基因拟合**一个**线性模型：截距 + 组别项
++（并给分类协变量表时）每个分类协变量以其字典序最小水平为参照的哑变量
++ 每个数值协变量的原值连续列（按表头顺序）。输出**组别项**与**每个数值
+连续列**各自的系数 `effect`、标准误 `std_error`、残差自由度 `df`、
+t 统计量 `t_stat`、双侧 P 值 `p_value`，并在每个簇的单项比较内把“组别项
++ 全部数值连续列”跨保留基因的全部 P 值作为**一个**校正家族做
+Benjamini-Hochberg 校正（`p_value_adj`）。设计矩阵秩不足或残差自由度
+不大于零时报数据错误（退出码 4），不产出结果、不触碰结果目录。启用时
+在既有结果之外新增两个文件（其余文件与不启用时逐字节一致，`run.json`
+除外）：
+
+- `cluster_pseudobulk_numeric_covariate_de.tsv`：列为 `cluster`、
+  `comparison_type`、`group_a`、`group_b`（one-vs-rest 时为空）、
+  `covariate`、`gene_id`、`effect`、`std_error`、`df`、`t_stat`、
+  `p_value`、`p_value_adj`。`covariate` 对组别项取 `group`，对数值连续列
+  取该协变量列名。行序按 `cluster` 升序，比较次序与
+  `cluster_pseudobulk_de.tsv` 一致；每比较内先组别项再各数值协变量
+  （表头顺序），每个检验项内按校正 P 值升序、`effect` 降序、`gene_id`
+  升序排列。
+- `cluster_pseudobulk_numeric_covariate_chart.tsv`：同列，在 `cluster`
+  之后加入 `rank`（列为 `cluster`、`rank`、`comparison_type`、`group_a`、
+  `group_b`、`covariate`、`gene_id` 与各统计值）；每个（簇, 比较, 检验项）
+  按校正 P 值升序、`effect` 降序、`gene_id` 升序取前 20 条，`rank` 自 1
+  起在每个检验项内单独编号。
+
+`run.json` 的 `input` 新增 `pseudobulk_numeric_covariates`，含 `name`、
+`sha256`（原始字节哈希，gzip 即压缩字节）、`covariates`（数值列名，表头
+顺序）与 `n_samples`；新增顶层 `cluster_pseudobulk_numeric_covariate_de`
+汇总，含 `covariates`、`tested_clusters`（升序）、`skipped_clusters`
+（升序）、`comparison_count`、`test_count`（全部簇/比较/检验项/基因数，
+检验项 = 组别项 + 数值连续列）与 `min_p_value_adj`（全部检验中的最小校正
+P 值）。分类协变量表本身的读取与 `cluster_pseudobulk_adjusted_de.tsv`
+的口径不受影响；TSV、MTX、gzip 各输入承载方式下等价矩阵的新增结果逐字节
+一致。目录非空或暂存、写出、发布失败报 `OutputPathError`（退出码 5），
+任何失败都不创建或改动结果目录。浮点用最短往返表示，相同输入、配置与
+seed 下内容、排序、浮点文本与 `run.json` 逐字节一致。
 
 ### `--detect-doublets` / `--expected-doublet-rate`（可选，双细胞识别与过滤）
 
