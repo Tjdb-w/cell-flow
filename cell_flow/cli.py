@@ -16,6 +16,8 @@
         [--cluster-pseudobulk-de] \\
         [--paired-replicate-metadata <配对重复元数据.tsv>] \\
         [--paired-cluster-pseudobulk-de] \\
+        [--pseudobulk-covariates <样本协变量.tsv>] \\
+        [--cluster-pseudobulk-adjusted-de] \\
         [--stability-analysis] [--stability-n-samples 100] \\
         [--stability-sample-fraction 0.8] [--stability-seed 20240617] \\
         [--pca-loadings]
@@ -52,6 +54,8 @@ USAGE = (
     "                [--cluster-pseudobulk-de]\n"
     "                [--paired-replicate-metadata <配对重复元数据.tsv>]\n"
     "                [--paired-cluster-pseudobulk-de]\n"
+    "                [--pseudobulk-covariates <样本协变量.tsv>]\n"
+    "                [--cluster-pseudobulk-adjusted-de]\n"
     "                [--stability-analysis] [--stability-n-samples N]\n"
     "                [--stability-sample-fraction F] [--stability-seed N]\n"
     "                [--pca-loadings]\n"
@@ -113,6 +117,10 @@ def _build_analyze_config(options: dict) -> Config:
     if paired_replicate_metadata_path == "":
         # --paired-replicate-metadata= 同上：空路径属配置错误
         raise _fail_usage("--paired-replicate-metadata 路径为空")
+    pseudobulk_covariates_path = options.get("pseudobulk_covariates")
+    if pseudobulk_covariates_path == "":
+        # --pseudobulk-covariates= 同上：空路径属配置错误
+        raise _fail_usage("--pseudobulk-covariates 路径为空")
     cell_type_reference_path = options.get("cell_type_reference")
     if cell_type_reference_path == "":
         # --cell-type-reference= 属调用不合法（配置错误，退出码 3）；
@@ -140,6 +148,7 @@ def _build_analyze_config(options: dict) -> Config:
         sample_column=options["sample_column"],
         replicate_metadata_path=replicate_metadata_path,
         paired_replicate_metadata_path=paired_replicate_metadata_path,
+        pseudobulk_covariates_path=pseudobulk_covariates_path,
         cell_type_reference_path=cell_type_reference_path,
         detect_doublets=bool(options.get("detect_doublets")),
         expected_doublet_rate=_parse_float(
@@ -168,6 +177,9 @@ def _build_analyze_config(options: dict) -> Config:
         paired_cluster_pseudobulk_de=bool(
             options.get("paired_cluster_pseudobulk_de")
         ),
+        cluster_pseudobulk_adjusted_de=bool(
+            options.get("cluster_pseudobulk_adjusted_de")
+        ),
         pca_loadings=bool(options.get("pca_loadings")),
     )
 
@@ -194,6 +206,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--sample-column": "sample_column",
         "--replicate-metadata": "replicate_metadata",
         "--paired-replicate-metadata": "paired_replicate_metadata",
+        "--pseudobulk-covariates": "pseudobulk_covariates",
         "--cell-type-reference": "cell_type_reference",
         "--enrichment-alpha": "enrichment_alpha",
         "--enrichment-min-log-fc": "enrichment_min_log_fc",
@@ -219,6 +232,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--differential-abundance": "differential_abundance",
         "--cluster-pseudobulk-de": "cluster_pseudobulk_de",
         "--paired-cluster-pseudobulk-de": "paired_cluster_pseudobulk_de",
+        "--cluster-pseudobulk-adjusted-de": "cluster_pseudobulk_adjusted_de",
         "--pca-loadings": "pca_loadings",
     }
     options = {
@@ -341,6 +355,29 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
             "--paired-replicate-metadata/--paired-cluster-pseudobulk-de 需与 "
             "--replicate-metadata、--cluster-pseudobulk-de 同时使用，且启用配对"
             "差异表达时还须提供 --paired-replicate-metadata"
+        )
+
+    if (
+        "pseudobulk_covariates" in explicit
+        and not (
+            options.get("cluster_pseudobulk_de")
+            and options.get("replicate_metadata") is not None
+        )
+    ) or (
+        options.get("cluster_pseudobulk_adjusted_de")
+        and not (
+            options.get("cluster_pseudobulk_de")
+            and options.get("replicate_metadata") is not None
+            and options.get("pseudobulk_covariates") is not None
+        )
+    ):
+        # 协变量参数仅在 --replicate-metadata 与 --cluster-pseudobulk-de
+        # 同时存在时有效：只给协变量表、或启用校正开关但缺任一基线或协变量表
+        # 都属配置错误
+        raise _fail_usage(
+            "--pseudobulk-covariates/--cluster-pseudobulk-adjusted-de 需与 "
+            "--replicate-metadata、--cluster-pseudobulk-de 同时使用，且启用协变量"
+            "校正差异表达时还须提供 --pseudobulk-covariates"
         )
 
     enrichment_param_keys = ("enrichment_alpha", "enrichment_min_log_fc")
