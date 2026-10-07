@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .errors import OutputPathError
 from .abundance import DifferentialAbundance
+from .adjusted_cluster_pseudobulk import AdjustedClusterPseudobulkDE
 from .batch import BatchSummaryRow
 from .cell_metadata import CellBatchReport
 from .cell_types import CellTypeAnnotations
@@ -86,6 +87,7 @@ class Artifacts:
     differential_abundance: Optional[DifferentialAbundance] = None
     cluster_pseudobulk: Optional[ClusterPseudobulkDE] = None
     paired_cluster_pseudobulk: Optional[PairedClusterPseudobulkDE] = None
+    adjusted_cluster_pseudobulk: Optional[AdjustedClusterPseudobulkDE] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -1071,6 +1073,108 @@ def _paired_cluster_pseudobulk_de_chart_tsv(
     return "\n".join(lines) + "\n"
 
 
+def _cluster_pseudobulk_adjusted_de_tsv(
+    result: AdjustedClusterPseudobulkDE,
+) -> str:
+    """最终簇内协变量校正的 pseudobulk 差异表达：前缀为 cluster、
+    comparison_type、group_a、group_b 与两组样本规模，效应与统计列为
+    校正模型的组别系数及其标准误、自由度、t、P 与校正 P。
+
+    行序按 cluster 升序，每簇先全部 one-vs-rest（group 升序，group_b 为空）
+    再全部 pairwise，与 cluster_pseudobulk_de.tsv 的比较次序一致；每个比较内
+    记录按校正 P 值升序、log_fc_adjusted 降序、gene_id 升序排列
+    （统计模块已定序）。
+    """
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "n_samples_a",
+                "n_samples_b",
+                "gene_id",
+                "mean_in_a",
+                "mean_in_b",
+                "log_fc_adjusted",
+                "std_error",
+                "df",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for _, _, _, _, records in result.comparisons:
+        for r in records:
+            lines.append(
+                tsv_row(
+                    [
+                        r.cluster,
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        r.n_samples_a,
+                        r.n_samples_b,
+                        r.gene_id,
+                        fmt_float(r.mean_in_a),
+                        fmt_float(r.mean_in_b),
+                        fmt_float(r.log_fc_adjusted),
+                        fmt_float(r.std_error),
+                        r.df,
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _cluster_pseudobulk_adjusted_de_chart_tsv(
+    result: AdjustedClusterPseudobulkDE,
+) -> str:
+    """每个簇每项比较取前 20 个基因：沿用差异表列序，在 group_b 后加入
+    自 1 起、每比较内单独编号的 rank，末列为 neg_log10_p_adj。"""
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "rank",
+                "gene_id",
+                "log_fc_adjusted",
+                "p_value",
+                "p_value_adj",
+                "neg_log10_p_adj",
+            ]
+        )
+    ]
+    for cluster, _, _, _, records in result.comparisons:
+        for rank, r in enumerate(records[:TOP_N_MARKERS], start=1):
+            lines.append(
+                tsv_row(
+                    [
+                        cluster,
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        rank,
+                        r.gene_id,
+                        fmt_float(r.log_fc_adjusted),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                        _neg_log10_p_adj(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
+
 def _normalized_expression_tsv(data: NormalizedData) -> str:
     """质控后保留基因（原行序）× 保留细胞（原列序）的 log 归一化表达。
 
@@ -1699,6 +1803,12 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         # 簇内配对 pseudobulk 差异表达产物；未启用时文件集不变
         final_names.append("paired_cluster_pseudobulk_de.tsv")
         final_names.append("paired_cluster_pseudobulk_de_chart.tsv")
+    if artifacts.adjusted_cluster_pseudobulk is not None:
+        # 仅 --cluster-pseudobulk-adjusted-de（必带 --replicate-metadata、
+        # --cluster-pseudobulk-de 与 --pseudobulk-covariates）运行产出
+        # 协变量校正的簇内 pseudobulk 差异表达产物；未启用时文件集不变
+        final_names.append("cluster_pseudobulk_adjusted_de.tsv")
+        final_names.append("cluster_pseudobulk_adjusted_de_chart.tsv")
     if artifacts.doublets is not None:
         # 仅 --detect-doublets 运行产出双细胞评分产物；未启用时文件集不变
         final_names.append("doublet_scores.tsv")
@@ -1940,6 +2050,23 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                 "paired_cluster_pseudobulk_de_chart.tsv",
                 _paired_cluster_pseudobulk_de_chart_tsv(
                     artifacts.paired_cluster_pseudobulk
+                ),
+            )
+        )
+    if artifacts.adjusted_cluster_pseudobulk is not None:
+        payload.append(
+            (
+                "cluster_pseudobulk_adjusted_de.tsv",
+                _cluster_pseudobulk_adjusted_de_tsv(
+                    artifacts.adjusted_cluster_pseudobulk
+                ),
+            )
+        )
+        payload.append(
+            (
+                "cluster_pseudobulk_adjusted_de_chart.tsv",
+                _cluster_pseudobulk_adjusted_de_chart_tsv(
+                    artifacts.adjusted_cluster_pseudobulk
                 ),
             )
         )

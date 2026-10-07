@@ -27,6 +27,10 @@ pseudobulk 基因集分组差异通过 `--pseudobulk-gene-set-de` 无值开关�
 最终簇内配对生物学重复差异表达通过
 `--paired-cluster-pseudobulk-de` 无值开关启用，并以
 `--paired-replicate-metadata` 指定配对表（两者仅在同时提供
+`--replicate-metadata` 与 `--cluster-pseudobulk-de` 时生效）；
+按样本协变量校正的簇内 pseudobulk 差异表达通过
+`--cluster-pseudobulk-adjusted-de` 无值开关启用，并以
+`--pseudobulk-covariates` 指定协变量表（两者仅在同时提供
 `--replicate-metadata` 与 `--cluster-pseudobulk-de` 时生效）。
 `--key value` 与 `--key=value` 两种写法均支持。跨样本批次校正见下文
 `--cell-metadata`。
@@ -455,6 +459,61 @@ Benjamini-Hochberg 校正。零方差且均值为零时 `t_stat` 为 0、`p_valu
 检验数）与 `min_p_value_adj`（全部检验中的最小校正 P 值）。目录非空或
 暂存、写出、发布失败报 `OutputPathError`（退出码 5），任何失败都不创建或
 改动结果目录。浮点格式沿用既有最短往返表示；相同输入、配置与 seed 下内容、
+排序、浮点文本与 `run.json` 逐字节一致。
+
+### `--pseudobulk-covariates` / `--cluster-pseudobulk-adjusted-de`（可选，按样本协变量校正的簇内 pseudobulk 差异表达）
+
+`--cluster-pseudobulk-adjusted-de` 是无值开关，`--pseudobulk-covariates
+<路径>` 取样本协变量表；两者仅在同时提供 `--replicate-metadata` 与
+`--cluster-pseudobulk-de` 时有效。缺少任一基线即启用开关或给出协变量表、
+启用校正开关却缺协变量表、或把开关写成带值形式（如
+`--cluster-pseudobulk-adjusted-de=true`），一律报配置错误（退出码 3）。
+仅给出 `--pseudobulk-covariates` 而不启用校正开关时不执行校正分析
+（但协变量表仍须通过读取校验）。未启用校正开关时，全部结果文件与
+`run.json` 与簇内 pseudobulk 基线逐字节一致。
+
+协变量表为 UTF-8 制表符文本或单成员 gzip（按 gzip 魔数识别，与文件名
+无关），首列恰为 `sample_id`，另有至少一个唯一命名的协变量列；每个
+`--replicate-metadata` 样本恰好一行，`sample_id` 唯一，全部字段非空，
+样本集合与重复元数据完全一致（不多不少）。协变量一律按离散标签处理。
+表头不符、协变量列缺失或命名重复、列数不符、空字段、样本重复、未覆盖
+全部重复样本、出现重复元数据之外的样本，或 gzip 多成员、尾随数据、
+截断、校验失败，一律报输入错误（退出码 2）。
+
+分析沿用簇内 pseudobulk 的保留范围、计数汇总、文库归一化与簇/比较枚举
+次序（簇升序，每簇先 one-vs-rest 再按 group 升序两两比较），是
+`cluster_pseudobulk_de.tsv` 的补充而非改写：Welch 结果原样保留。每个簇
+与每项比较只用该簇内的有效样本（该簇内含保留细胞的样本；两两比较只用
+两个目标 group 的样本），以样本为观测对每个保留基因拟合线性模型：截距
++ 组别项 + 每个协变量以其字典序最小水平为参照的哑变量（只出现一个水平
+的协变量不产生哑变量列）。组别系数即 `log_fc_adjusted`，同时输出其标准
+误、残差自由度、t 统计量与双侧 P 值，并在每个簇比较内跨保留基因做
+Benjamini-Hochberg 校正。设计矩阵秩不足或残差自由度不大于零时报数据
+错误（退出码 4），不产出结果、不触碰结果目录。启用时在既有结果之外
+新增两个文件（其余文件与不启用时逐字节一致，`run.json` 除外）：
+
+- `cluster_pseudobulk_adjusted_de.tsv`：列为 `cluster`、
+  `comparison_type`、`group_a`、`group_b`（one-vs-rest 时为空）、
+  `n_samples_a`、`n_samples_b`、`gene_id`、`mean_in_a`、`mean_in_b`
+  （两组未校正均值）、`log_fc_adjusted`、`std_error`、`df`、`t_stat`、
+  `p_value`、`p_value_adj`。行序按 `cluster` 升序，比较次序与
+  `cluster_pseudobulk_de.tsv` 一致；每项比较内按校正 P 值升序、
+  `log_fc_adjusted` 降序、`gene_id` 升序排列。
+- `cluster_pseudobulk_adjusted_de_chart.tsv`：每个簇每项比较取差异表
+  前 20 行，在 `group_b` 之后加入自 1 起、每比较内单独编号的 `rank`，
+  列为 `cluster`、`comparison_type`、`group_a`、`group_b`、`rank`、
+  `gene_id`、`log_fc_adjusted`、`p_value`、`p_value_adj`、
+  `neg_log10_p_adj`（末列）。
+
+`run.json` 的 `parameters` 增加 `"cluster_pseudobulk_adjusted_de": true`；
+`input` 新增 `pseudobulk_covariates`，含 `name`、`sha256`（原始字节
+哈希）、`covariates`（协变量列名，表头顺序）与 `n_samples`；新增顶层
+`cluster_pseudobulk_adjusted_de` 汇总，含 `covariates`、
+`tested_clusters`（升序）、`skipped_clusters`（升序）、
+`comparison_count`、`test_count`（全部簇/比较/基因检验数）与
+`min_p_value_adj`（全部检验中的最小校正 P 值）。目录非空或暂存、写出、
+发布失败报 `OutputPathError`（退出码 5），任何失败都不创建或改动结果
+目录。浮点格式沿用既有最短往返表示；相同输入、配置与 seed 下内容、
 排序、浮点文本与 `run.json` 逐字节一致。
 
 ### `--detect-doublets` / `--expected-doublet-rate`（可选，双细胞识别与过滤）

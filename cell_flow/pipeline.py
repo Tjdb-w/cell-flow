@@ -6,6 +6,10 @@ from typing import Any, Dict, List, Optional, Union
 
 from . import __version__
 from .abundance import DifferentialAbundance, compute_differential_abundance
+from .adjusted_cluster_pseudobulk import (
+    AdjustedClusterPseudobulkDE,
+    compute_adjusted_cluster_pseudobulk_de,
+)
 from .batch import BatchSummaryRow, read_batch_metadata
 from .cell_metadata import (
     DEFAULT_BATCH_COLUMN,
@@ -43,6 +47,7 @@ from .paired_replicate import (
     read_paired_replicate_metadata,
 )
 from .pca import MAX_PCS, PCALoadings, compute_pca_loadings, run_pca
+from .pseudobulk_covariates import PseudobulkCovariates, read_pseudobulk_covariates
 from .pseudobulk_gene_sets import (
     PseudobulkGeneSetScores,
     score_pseudobulk_gene_sets,
@@ -103,6 +108,8 @@ class Config:
     cluster_pseudobulk_de: bool = False
     paired_replicate_metadata_path: Optional[str] = None
     paired_cluster_pseudobulk_de: bool = False
+    pseudobulk_covariates_path: Optional[str] = None
+    cluster_pseudobulk_adjusted_de: bool = False
     pca_loadings: bool = False
 
     @property
@@ -163,6 +170,10 @@ class Config:
         if self.paired_cluster_pseudobulk_de:
             # 仅显式启用簇内配对 pseudobulk 差异表达时记录；未启用时与基线一致
             parameters["paired_cluster_pseudobulk_de"] = True
+        if self.cluster_pseudobulk_adjusted_de:
+            # 仅显式启用协变量校正的簇内 pseudobulk 差异表达时记录；
+            # 未启用时与基线一致
+            parameters["cluster_pseudobulk_adjusted_de"] = True
         if self.pca_loadings:
             # 仅显式启用 PCA 载荷输出时记录；未启用时 parameters 与基线一致
             parameters["pca_loadings"] = True
@@ -262,6 +273,30 @@ def validate_config(config: Config) -> None:
             "--paired-cluster-pseudobulk-de 需与 --replicate-metadata、"
             "--cluster-pseudobulk-de、--paired-replicate-metadata 同时使用"
         )
+    if not isinstance(config.cluster_pseudobulk_adjusted_de, bool):
+        errors.append("--cluster-pseudobulk-adjusted-de 必须是无值开关参数")
+    if config.pseudobulk_covariates_path is not None and (
+        config.replicate_metadata_path is None
+        or not config.cluster_pseudobulk_de
+    ):
+        # 样本协变量表建立在 --replicate-metadata 样本基线与
+        # --cluster-pseudobulk-de 簇内 pseudobulk 基线之上
+        errors.append(
+            "--pseudobulk-covariates 需与 --replicate-metadata、"
+            "--cluster-pseudobulk-de 同时使用"
+        )
+    if config.cluster_pseudobulk_adjusted_de and (
+        config.replicate_metadata_path is None
+        or not config.cluster_pseudobulk_de
+        or config.pseudobulk_covariates_path is None
+    ):
+        # 协变量校正的簇内 pseudobulk 差异表达建立在
+        # --replicate-metadata、--cluster-pseudobulk-de 基线之上，
+        # 并须提供样本协变量表
+        errors.append(
+            "--cluster-pseudobulk-adjusted-de 需与 --replicate-metadata、"
+            "--cluster-pseudobulk-de、--pseudobulk-covariates 同时使用"
+        )
     if config.cell_metadata_path is not None:
         if config.batch_metadata_path is not None:
             errors.append("--cell-metadata 与 --batch-metadata 不能同时使用")
@@ -339,6 +374,15 @@ def run(config: Config) -> List[str]:
         assert replicate_metadata is not None
         paired_replicate_metadata = read_paired_replicate_metadata(
             config.paired_replicate_metadata_path,
+            replicate_metadata.sample_order,
+        )
+    pseudobulk_covariates = None
+    if config.pseudobulk_covariates_path is not None:
+        # 样本协变量同属输入：在触碰输出目录之前完成读取与校验；协变量表必须
+        # 与 --replicate-metadata 的全部样本一一对应，格式/覆盖错误报输入错误
+        assert replicate_metadata is not None
+        pseudobulk_covariates = read_pseudobulk_covariates(
+            config.pseudobulk_covariates_path,
             replicate_metadata.sample_order,
         )
     # 细胞类型标记参考同属输入：先完成读取与校验，任何不合法都在触碰输出
@@ -678,6 +722,29 @@ def run(config: Config) -> List[str]:
             pseudobulk.sample_ids,
         )
 
+    # 最终簇内按样本协变量校正的 pseudobulk 差异表达：沿用簇内 pseudobulk 的
+    # 保留范围、计数汇总、文库归一化与簇/比较枚举次序，以样本为观测拟合
+    # 截距 + 组别项 + 协变量哑变量（字典序最小水平为参照）的线性模型，
+    # 组别系数即 log_fc_adjusted，簇比较内跨保留基因做 BH。仅在
+    # --cluster-pseudobulk-adjusted-de（必带 --replicate-metadata、
+    # --cluster-pseudobulk-de 与 --pseudobulk-covariates）时执行；是对
+    # cluster_pseudobulk_de.tsv 的补充，不改写其 Welch 结果。设计矩阵秩不足
+    # 或残差自由度不大于零在此报数据错误（退出码 4），不触碰输出目录。
+    adjusted_cluster_pseudobulk: Optional[AdjustedClusterPseudobulkDE] = None
+    if config.cluster_pseudobulk_adjusted_de:
+        assert (
+            replicate_metadata is not None
+            and pseudobulk_covariates is not None
+            and cluster_pseudobulk is not None
+        )
+        adjusted_cluster_pseudobulk = compute_adjusted_cluster_pseudobulk_de(
+            matrix,
+            analysis_qc,
+            clustering.labels,
+            replicate_metadata,
+            pseudobulk_covariates,
+        )
+
     # pseudobulk 基因集分组差异：在 pseudobulk log1p 值上按集合（与保留基因
     # 交集）给样本评分，再以样本为观测做分组 Welch t/BH。仅在
     # --pseudobulk-gene-set-de（必带 --gene-sets 与 --replicate-metadata）
@@ -831,6 +898,18 @@ def run(config: Config) -> List[str]:
             "sha256": paired_replicate_metadata.sha256,
             "pair_count": len(paired_replicate_metadata.pair_order),
             "pairs_after_qc": len(present_pairs),
+        }
+    if (
+        config.cluster_pseudobulk_adjusted_de
+        and pseudobulk_covariates is not None
+    ):
+        # 样本协变量来源、原始字节 SHA-256 与协变量列；仅显式启用校正差异
+        # 表达时出现，未启用时既有 input 字段逐字节不变
+        input_info["pseudobulk_covariates"] = {
+            "name": pseudobulk_covariates.name,
+            "sha256": pseudobulk_covariates.sha256,
+            "covariates": list(pseudobulk_covariates.covariate_names),
+            "n_samples": len(pseudobulk_covariates.sample_levels),
         }
 
     if cell_type_reference is not None and cell_type_annotations is not None:
@@ -1003,6 +1082,18 @@ def run(config: Config) -> List[str]:
             "test_count": paired_cluster_pseudobulk.test_count,
             "min_p_value_adj": paired_cluster_pseudobulk.min_p_value_adj,
         }
+    if adjusted_cluster_pseudobulk is not None:
+        # 协变量校正的簇内 pseudobulk 差异表达汇总：参与校正的协变量、
+        # 已检验/跳过的簇、比较数、检验数与全部检验中的最小校正 P 值；
+        # 仅显式启用时出现，既有字段不变
+        run_info["cluster_pseudobulk_adjusted_de"] = {
+            "covariates": list(adjusted_cluster_pseudobulk.covariate_names),
+            "tested_clusters": list(adjusted_cluster_pseudobulk.tested_clusters),
+            "skipped_clusters": list(adjusted_cluster_pseudobulk.skipped_clusters),
+            "comparison_count": adjusted_cluster_pseudobulk.comparison_count,
+            "test_count": adjusted_cluster_pseudobulk.test_count,
+            "min_p_value_adj": adjusted_cluster_pseudobulk.min_p_value_adj,
+        }
 
     artifacts = Artifacts(
         qc=qc,
@@ -1027,6 +1118,7 @@ def run(config: Config) -> List[str]:
         differential_abundance=differential_abundance,
         cluster_pseudobulk=cluster_pseudobulk,
         paired_cluster_pseudobulk=paired_cluster_pseudobulk,
+        adjusted_cluster_pseudobulk=adjusted_cluster_pseudobulk,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障
