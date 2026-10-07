@@ -131,6 +131,23 @@ def welch_ttest(a: Sequence[float], b: Sequence[float]) -> tuple[float, float]:
     return t, t_sf_two_sided(t, df)
 
 
+def paired_ttest(differences: Sequence[float]) -> tuple[float, float]:
+    """配对 t 检验：对一组配对差值检验均值是否为零，返回 (t 统计量, 双侧 P 值)。
+
+    t 为差值均值除以差值样本标准差再乘差值个数平方根，自由度为 n - 1。
+    退化情形（差值方差为 0）：均值为 0 => t=0,p=1；均值非零 => t=±inf,p=0。
+    """
+    n = len(differences)
+    m = mean(differences)
+    v = unbiased_variance(differences, m)
+    if v <= 0.0:
+        if m == 0.0:
+            return 0.0, 1.0
+        return math.inf if m > 0 else -math.inf, 0.0
+    t = m / math.sqrt(v) * math.sqrt(n)
+    return t, t_sf_two_sided(t, n - 1)
+
+
 def benjamini_hochberg(pvalues: Sequence[float]) -> List[float]:
     """BH-FDR 校正，返回与输入等长的 q 值；并列同值、单调化处理确定。"""
     n = len(pvalues)

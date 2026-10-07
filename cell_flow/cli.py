@@ -14,6 +14,7 @@
         [--enrich-markers] [--enrichment-alpha F] [--enrichment-min-log-fc F] \\
         [--pseudobulk-gene-set-de] [--differential-abundance] \\
         [--cluster-pseudobulk-de] \\
+        [--paired-cluster-pseudobulk-de --pair-metadata <配对元数据.tsv>] \\
         [--stability-analysis] [--stability-n-samples 100] \\
         [--stability-sample-fraction 0.8] [--stability-seed 20240617] \\
         [--pca-loadings]
@@ -48,6 +49,7 @@ USAGE = (
     "                [--enrichment-min-log-fc F]\n"
     "                [--pseudobulk-gene-set-de] [--differential-abundance]\n"
     "                [--cluster-pseudobulk-de]\n"
+    "                [--paired-cluster-pseudobulk-de --pair-metadata <配对元数据.tsv>]\n"
     "                [--stability-analysis] [--stability-n-samples N]\n"
     "                [--stability-sample-fraction F] [--stability-seed N]\n"
     "                [--pca-loadings]\n"
@@ -105,6 +107,10 @@ def _build_analyze_config(options: dict) -> Config:
     if replicate_metadata_path == "":
         # --replicate-metadata= 同上：空路径属配置错误
         raise _fail_usage("--replicate-metadata 路径为空")
+    pair_metadata_path = options.get("pair_metadata")
+    if pair_metadata_path == "":
+        # --pair-metadata= 同上：空路径属配置错误
+        raise _fail_usage("--pair-metadata 路径为空")
     cell_type_reference_path = options.get("cell_type_reference")
     if cell_type_reference_path == "":
         # --cell-type-reference= 属调用不合法（配置错误，退出码 3）；
@@ -131,6 +137,7 @@ def _build_analyze_config(options: dict) -> Config:
         batch_column=options["batch_column"],
         sample_column=options["sample_column"],
         replicate_metadata_path=replicate_metadata_path,
+        pair_metadata_path=pair_metadata_path,
         cell_type_reference_path=cell_type_reference_path,
         detect_doublets=bool(options.get("detect_doublets")),
         expected_doublet_rate=_parse_float(
@@ -156,6 +163,9 @@ def _build_analyze_config(options: dict) -> Config:
         pseudobulk_gene_set_de=bool(options.get("pseudobulk_gene_set_de")),
         differential_abundance=bool(options.get("differential_abundance")),
         cluster_pseudobulk_de=bool(options.get("cluster_pseudobulk_de")),
+        paired_cluster_pseudobulk_de=bool(
+            options.get("paired_cluster_pseudobulk_de")
+        ),
         pca_loadings=bool(options.get("pca_loadings")),
     )
 
@@ -181,6 +191,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--batch-column": "batch_column",
         "--sample-column": "sample_column",
         "--replicate-metadata": "replicate_metadata",
+        "--pair-metadata": "pair_metadata",
         "--cell-type-reference": "cell_type_reference",
         "--enrichment-alpha": "enrichment_alpha",
         "--enrichment-min-log-fc": "enrichment_min_log_fc",
@@ -205,6 +216,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--pseudobulk-gene-set-de": "pseudobulk_gene_set_de",
         "--differential-abundance": "differential_abundance",
         "--cluster-pseudobulk-de": "cluster_pseudobulk_de",
+        "--paired-cluster-pseudobulk-de": "paired_cluster_pseudobulk_de",
         "--pca-loadings": "pca_loadings",
     }
     options = {
@@ -305,6 +317,45 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         # 无值开关带值（--flag=x）已在上方按未知参数拒绝
         raise _fail_usage(
             "--cluster-pseudobulk-de 需与 --replicate-metadata 同时使用"
+        )
+
+    if options.get("paired_cluster_pseudobulk_de") and options.get(
+        "pair_metadata"
+    ) is None:
+        # 配对簇内 pseudobulk 差异表达必须提供配对元数据；
+        # 无值开关带值（--flag=x）已在上方按未知参数拒绝
+        raise _fail_usage(
+            "--paired-cluster-pseudobulk-de 需与 --pair-metadata 同时使用"
+        )
+
+    if options.get("pair_metadata") is not None and (
+        options.get("replicate_metadata") is None
+        or not options.get("cluster_pseudobulk_de")
+    ):
+        # 配对元数据只在 --replicate-metadata 与 --cluster-pseudobulk-de
+        # 两条基线同时存在时有效
+        raise _fail_usage(
+            "--pair-metadata 需与 --replicate-metadata、"
+            "--cluster-pseudobulk-de 同时使用"
+        )
+
+    if options.get("pair_metadata") is not None and (
+        options.get("replicate_metadata") is None
+        or not options.get("cluster_pseudobulk_de")
+    ):
+        # 配对元数据只在 --replicate-metadata 与 --cluster-pseudobulk-de
+        # 两条基线同时存在时有效
+        raise _fail_usage(
+            "--pair-metadata 需与 --replicate-metadata、"
+            "--cluster-pseudobulk-de 同时使用"
+        )
+
+    if options.get("paired_cluster_pseudobulk_de") and options.get(
+        "pair_metadata"
+    ) is None:
+        # 配对簇内 pseudobulk 差异表达必须提供配对元数据
+        raise _fail_usage(
+            "--paired-cluster-pseudobulk-de 需与 --pair-metadata 同时使用"
         )
 
     enrichment_param_keys = ("enrichment_alpha", "enrichment_min_log_fc")
