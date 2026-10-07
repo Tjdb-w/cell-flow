@@ -23,7 +23,11 @@ pseudobulk 基因集分组差异通过 `--pseudobulk-gene-set-de` 无值开关�
 （仅在提供 `--replicate-metadata` 时生效）；
 最终簇内按生物学重复汇总的 pseudobulk 差异表达通过
 `--cluster-pseudobulk-de` 无值开关启用（仅在提供
-`--replicate-metadata` 时生效）。
+`--replicate-metadata` 时生效）；
+最终簇内配对生物学重复差异表达通过
+`--paired-cluster-pseudobulk-de` 无值开关启用，并以
+`--paired-replicate-metadata` 指定配对表（两者仅在同时提供
+`--replicate-metadata` 与 `--cluster-pseudobulk-de` 时生效）。
 `--key value` 与 `--key=value` 两种写法均支持。跨样本批次校正见下文
 `--cell-metadata`。
 
@@ -399,6 +403,59 @@ Welch t，差异值为 `log_fc`（a 组均值减 b 组均值），Benjamini-Hoch
 `--batch-metadata`、`--cell-metadata`、`--gene-sets`、
 `--pseudobulk-gene-set-de`、`--differential-abundance`、`--detect-doublets`
 等其余可选项并用，不改变它们的文件与口径。
+
+### `--paired-replicate-metadata` / `--paired-cluster-pseudobulk-de`（可选，最终簇内配对 pseudobulk 差异表达）
+
+`--paired-cluster-pseudobulk-de` 是无值开关，`--paired-replicate-metadata
+<路径>` 取配对表；两者仅在同时提供 `--replicate-metadata` 与
+`--cluster-pseudobulk-de` 时有效。缺少任一基线即启用开关或给出配对表、
+启用配对开关却缺配对表、或把开关写成带值形式（如
+`--paired-cluster-pseudobulk-de=true`），一律报配置错误（退出码 3）。
+仅给出 `--paired-replicate-metadata` 而不启用配对开关时不执行配对分析
+（但配对表仍须通过读取校验）。未启用配对开关时，全部结果文件与
+`run.json` 与簇内 pseudobulk 基线逐字节一致。
+
+配对表为 UTF-8 制表符文本或单成员 gzip（按 gzip 魔数识别，与文件名无关），
+表头恰为 `sample_id`、`pair_id` 两列；每个 `--replicate-metadata` 样本
+恰好一行，`sample_id` 唯一、`pair_id` 非空，不多不少。表头不符、列数不符、
+空样本或空配对标识、样本重复、未覆盖全部重复样本、出现重复元数据之外的
+样本，或 gzip 多成员、尾随数据、截断、校验失败，一律报输入错误（退出码 2）。
+
+分析沿用簇内 pseudobulk 的保留范围、计数汇总与文库归一化：对每个最终簇
+与样本，只汇总该簇内保留细胞在保留基因上的原始计数，该簇内样本文库归一到
+10000 后取 log1p。质控后恰有两个 group 时按字典序确定 a、b；每个 pair 必须
+各含一个 a、b 样本且样本不得重复，否则按 pair 归属错误报输入错误（退出码
+2）。每个簇只用两个成员在该簇内都有保留细胞的完整 pair，成员缺失的 pair
+不纳入该簇也不补零；完整 pair 少于两个的簇跳过。只要存在至少一个可检验簇
+即正常完成，跳过簇仅在汇总中记录；没有任何可检验簇时报数据错误（退出码 4），
+不产出结果、不触碰结果目录。
+
+每个基因对 a 减 b 的 pair 差值做双侧配对 t 检验：`t_stat` 为差值均值除以
+差值样本标准差再乘 pair 数平方根，自由度为 pair 数减一，簇内跨基因做
+Benjamini-Hochberg 校正。零方差且均值为零时 `t_stat` 为 0、`p_value` 为
+1；零方差且均值非零时 `t_stat` 为 `inf` 或 `-inf`、`p_value` 为 0。启用时
+在既有结果之外新增两个文件（其余文件与不启用时逐字节一致，`run.json`
+除外）：
+
+- `paired_cluster_pseudobulk_de.tsv`：列为 `cluster`、`group_a`、
+  `group_b`、`pair_count`、`gene_id`、`mean_difference`（a 减 b 的差值
+  均值）、`t_stat`、`p_value`、`p_value_adj`。行序按 `cluster` 升序，
+  每簇内按校正 P 值升序、`mean_difference` 降序、`gene_id` 升序排列。
+- `paired_cluster_pseudobulk_de_chart.tsv`：每个簇取差异表前 20 行，
+  在 `pair_count` 之后加入自 1 起、每簇内单独编号的 `rank`，列为
+  `cluster`、`group_a`、`group_b`、`pair_count`、`rank`、`gene_id`、
+  `mean_difference`、`t_stat`、`p_value`、`p_value_adj`。
+
+`run.json` 的 `parameters` 增加 `"paired_cluster_pseudobulk_de": true`；
+`input` 新增 `paired_replicate_metadata`，含 `name`、`sha256`（原始字节
+哈希）、`pair_count`（配对表 pair 数）与 `pairs_after_qc`（质控后样本涉及
+的 pair 数）；新增顶层 `paired_cluster_pseudobulk_de` 汇总，含 `group_a`、
+`group_b`、`tested_clusters`（升序）、`skipped_clusters`（升序）、
+`pair_counts`（与已检验簇对齐的完整 pair 数）、`test_count`（全部簇/基因
+检验数）与 `min_p_value_adj`（全部检验中的最小校正 P 值）。目录非空或
+暂存、写出、发布失败报 `OutputPathError`（退出码 5），任何失败都不创建或
+改动结果目录。浮点格式沿用既有最短往返表示；相同输入、配置与 seed 下内容、
+排序、浮点文本与 `run.json` 逐字节一致。
 
 ### `--detect-doublets` / `--expected-doublet-rate`（可选，双细胞识别与过滤）
 

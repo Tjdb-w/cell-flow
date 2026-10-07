@@ -31,6 +31,7 @@ from .gene_sets import GeneSetScores
 from .kmeans import KMeansResult
 from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
+from .paired_cluster_pseudobulk import PairedClusterPseudobulkDE
 from .pca import PCALoadings, PCAResult
 from .pseudobulk_gene_sets import PseudobulkGeneSetScores
 from .qc import QCResult
@@ -84,6 +85,7 @@ class Artifacts:
     pseudobulk_gene_set_scores: Optional[PseudobulkGeneSetScores] = None
     differential_abundance: Optional[DifferentialAbundance] = None
     cluster_pseudobulk: Optional[ClusterPseudobulkDE] = None
+    paired_cluster_pseudobulk: Optional[PairedClusterPseudobulkDE] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -983,6 +985,92 @@ def _cluster_pseudobulk_de_chart_tsv(result: ClusterPseudobulkDE) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _paired_cluster_pseudobulk_de_tsv(
+    result: PairedClusterPseudobulkDE,
+) -> str:
+    """最终簇内配对 pseudobulk 差异表达：列为 cluster、group_a、group_b、
+    pair_count、gene_id、mean_difference、t_stat、p_value、p_value_adj。
+
+    行序按 cluster 升序，每簇内按校正 P 值升序、mean_difference 降序、
+    gene_id 升序排列（统计模块已定序）。
+    """
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "group_a",
+                "group_b",
+                "pair_count",
+                "gene_id",
+                "mean_difference",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for cluster, pair_count, records in result.results:
+        for r in records:
+            lines.append(
+                tsv_row(
+                    [
+                        cluster,
+                        r.group_a,
+                        r.group_b,
+                        pair_count,
+                        r.gene_id,
+                        fmt_float(r.mean_difference),
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _paired_cluster_pseudobulk_de_chart_tsv(
+    result: PairedClusterPseudobulkDE,
+) -> str:
+    """每个簇取差异表前 20 行，在 pair_count 后加入自 1 起、每簇内单独
+    编号的 rank；其余列与差异表一致。"""
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "group_a",
+                "group_b",
+                "pair_count",
+                "rank",
+                "gene_id",
+                "mean_difference",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for cluster, pair_count, records in result.results:
+        for rank, r in enumerate(records[:TOP_N_MARKERS], start=1):
+            lines.append(
+                tsv_row(
+                    [
+                        cluster,
+                        r.group_a,
+                        r.group_b,
+                        pair_count,
+                        rank,
+                        r.gene_id,
+                        fmt_float(r.mean_difference),
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
 def _normalized_expression_tsv(data: NormalizedData) -> str:
     """质控后保留基因（原行序）× 保留细胞（原列序）的 log 归一化表达。
 
@@ -1605,6 +1693,12 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         # 簇内 pseudobulk 差异表达产物；未启用时文件集不变
         final_names.append("cluster_pseudobulk_de.tsv")
         final_names.append("cluster_pseudobulk_de_chart.tsv")
+    if artifacts.paired_cluster_pseudobulk is not None:
+        # 仅 --paired-cluster-pseudobulk-de（必带 --replicate-metadata、
+        # --cluster-pseudobulk-de 与 --paired-replicate-metadata）运行产出
+        # 簇内配对 pseudobulk 差异表达产物；未启用时文件集不变
+        final_names.append("paired_cluster_pseudobulk_de.tsv")
+        final_names.append("paired_cluster_pseudobulk_de_chart.tsv")
     if artifacts.doublets is not None:
         # 仅 --detect-doublets 运行产出双细胞评分产物；未启用时文件集不变
         final_names.append("doublet_scores.tsv")
@@ -1830,6 +1924,23 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             (
                 "cluster_pseudobulk_de_chart.tsv",
                 _cluster_pseudobulk_de_chart_tsv(artifacts.cluster_pseudobulk),
+            )
+        )
+    if artifacts.paired_cluster_pseudobulk is not None:
+        payload.append(
+            (
+                "paired_cluster_pseudobulk_de.tsv",
+                _paired_cluster_pseudobulk_de_tsv(
+                    artifacts.paired_cluster_pseudobulk
+                ),
+            )
+        )
+        payload.append(
+            (
+                "paired_cluster_pseudobulk_de_chart.tsv",
+                _paired_cluster_pseudobulk_de_chart_tsv(
+                    artifacts.paired_cluster_pseudobulk
+                ),
             )
         )
     if artifacts.doublets is not None:

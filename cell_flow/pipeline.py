@@ -34,6 +34,14 @@ from .metadata import read_metadata
 from .mtx import read_mtx_directory
 from .normalize import normalize_and_select_hvg
 from .output import Artifacts, publish_results
+from .paired_cluster_pseudobulk import (
+    PairedClusterPseudobulkDE,
+    compute_paired_cluster_pseudobulk_de,
+)
+from .paired_replicate import (
+    PairedReplicateMetadata,
+    read_paired_replicate_metadata,
+)
 from .pca import MAX_PCS, PCALoadings, compute_pca_loadings, run_pca
 from .pseudobulk_gene_sets import (
     PseudobulkGeneSetScores,
@@ -93,6 +101,8 @@ class Config:
     pseudobulk_gene_set_de: bool = False
     differential_abundance: bool = False
     cluster_pseudobulk_de: bool = False
+    paired_replicate_metadata_path: Optional[str] = None
+    paired_cluster_pseudobulk_de: bool = False
     pca_loadings: bool = False
 
     @property
@@ -150,6 +160,9 @@ class Config:
         if self.cluster_pseudobulk_de:
             # 仅显式启用簇内 pseudobulk 差异表达时记录；未启用时与基线一致
             parameters["cluster_pseudobulk_de"] = True
+        if self.paired_cluster_pseudobulk_de:
+            # 仅显式启用簇内配对 pseudobulk 差异表达时记录；未启用时与基线一致
+            parameters["paired_cluster_pseudobulk_de"] = True
         if self.pca_loadings:
             # 仅显式启用 PCA 载荷输出时记录；未启用时 parameters 与基线一致
             parameters["pca_loadings"] = True
@@ -229,12 +242,25 @@ def validate_config(config: Config) -> None:
         errors.append("--differential-abundance 需与 --replicate-metadata 同时使用")
     if not isinstance(config.cluster_pseudobulk_de, bool):
         errors.append("--cluster-pseudobulk-de 必须是无值开关参数")
+    if not isinstance(config.paired_cluster_pseudobulk_de, bool):
+        errors.append("--paired-cluster-pseudobulk-de 必须是无值开关参数")
     if not isinstance(config.pca_loadings, bool):
         errors.append("--pca-loadings 必须是无值开关参数")
     if config.cluster_pseudobulk_de and config.replicate_metadata_path is None:
         # 簇内 pseudobulk 差异表达建立在 --replicate-metadata 样本分组基线上
         errors.append(
             "--cluster-pseudobulk-de 需与 --replicate-metadata 同时使用"
+        )
+    if config.paired_cluster_pseudobulk_de and (
+        config.replicate_metadata_path is None
+        or not config.cluster_pseudobulk_de
+        or config.paired_replicate_metadata_path is None
+    ):
+        # 簇内配对 pseudobulk 差异表达建立在 --replicate-metadata 样本基线与
+        # --cluster-pseudobulk-de 簇内 pseudobulk 基线之上，并须提供配对元数据
+        errors.append(
+            "--paired-cluster-pseudobulk-de 需与 --replicate-metadata、"
+            "--cluster-pseudobulk-de、--paired-replicate-metadata 同时使用"
         )
     if config.cell_metadata_path is not None:
         if config.batch_metadata_path is not None:
@@ -305,6 +331,15 @@ def run(config: Config) -> List[str]:
     if config.replicate_metadata_path is not None:
         replicate_metadata = read_replicate_metadata(
             config.replicate_metadata_path, matrix.cell_ids
+        )
+    paired_replicate_metadata = None
+    if config.paired_replicate_metadata_path is not None:
+        # 配对元数据同属输入：在触碰输出目录之前完成读取与校验；配对表必须
+        # 与 --replicate-metadata 的全部样本一一对应，格式/覆盖错误报输入错误
+        assert replicate_metadata is not None
+        paired_replicate_metadata = read_paired_replicate_metadata(
+            config.paired_replicate_metadata_path,
+            replicate_metadata.sample_order,
         )
     # 细胞类型标记参考同属输入：先完成读取与校验，任何不合法都在触碰输出
     # 目录之前失败；标记与保留基因无交集在质控后按数据错误（退出码 4）处理
@@ -620,6 +655,29 @@ def run(config: Config) -> List[str]:
                 "含保留细胞的有效样本，无法进行簇内 pseudobulk 差异表达"
             )
 
+    # 最终簇内配对 pseudobulk 差异表达：沿用簇内 pseudobulk 的保留范围、
+    # 计数汇总与文库归一化，以 a 减 b 的 pair 差值为观测做双侧配对 t 检验、
+    # 簇内跨基因 BH。仅在 --paired-cluster-pseudobulk-de（必带
+    # --replicate-metadata、--cluster-pseudobulk-de 与
+    # --paired-replicate-metadata）时执行。质控后 group 不为两个或任一 pair
+    # 不同时含两个 group 各一个样本报输入错误（退出码 2）；无任何簇具备至少
+    # 两个完整 pair 报数据错误（退出码 4）；均在触碰输出目录之前失败。
+    paired_cluster_pseudobulk: Optional[PairedClusterPseudobulkDE] = None
+    if config.paired_cluster_pseudobulk_de:
+        assert (
+            replicate_metadata is not None
+            and paired_replicate_metadata is not None
+            and pseudobulk is not None
+        )
+        paired_cluster_pseudobulk = compute_paired_cluster_pseudobulk_de(
+            matrix,
+            analysis_qc,
+            clustering.labels,
+            replicate_metadata,
+            paired_replicate_metadata,
+            pseudobulk.sample_ids,
+        )
+
     # pseudobulk 基因集分组差异：在 pseudobulk log1p 值上按集合（与保留基因
     # 交集）给样本评分，再以样本为观测做分组 Welch t/BH。仅在
     # --pseudobulk-gene-set-de（必带 --gene-sets 与 --replicate-metadata）
@@ -756,6 +814,23 @@ def run(config: Config) -> List[str]:
             "group_replicates_after_qc": {
                 group: kept_group_sizes[group] for group in kept_groups
             },
+        }
+    if (
+        config.paired_cluster_pseudobulk_de
+        and paired_replicate_metadata is not None
+        and pseudobulk is not None
+    ):
+        # 配对元数据来源、原始字节 SHA-256 与配对规模；仅显式启用配对差异
+        # 表达时出现，未启用时既有 input 字段逐字节不变
+        present_pairs = {
+            paired_replicate_metadata.sample_pair[sample_id]
+            for sample_id in pseudobulk.sample_ids
+        }
+        input_info["paired_replicate_metadata"] = {
+            "name": paired_replicate_metadata.name,
+            "sha256": paired_replicate_metadata.sha256,
+            "pair_count": len(paired_replicate_metadata.pair_order),
+            "pairs_after_qc": len(present_pairs),
         }
 
     if cell_type_reference is not None and cell_type_annotations is not None:
@@ -914,6 +989,20 @@ def run(config: Config) -> List[str]:
             "test_count": cluster_pseudobulk.test_count,
             "min_p_value_adj": cluster_pseudobulk.min_p_value_adj,
         }
+    if paired_cluster_pseudobulk is not None:
+        # 簇内配对 pseudobulk 差异表达汇总：a/b 分组、已检验/跳过的簇、
+        # 各簇 pair 数、检验数与全部检验中的最小校正 P 值；仅显式启用时出现
+        run_info["paired_cluster_pseudobulk_de"] = {
+            "group_a": paired_cluster_pseudobulk.group_a,
+            "group_b": paired_cluster_pseudobulk.group_b,
+            "tested_clusters": list(paired_cluster_pseudobulk.tested_clusters),
+            "skipped_clusters": list(paired_cluster_pseudobulk.skipped_clusters),
+            "pair_counts": [
+                pair_count for _, pair_count, _ in paired_cluster_pseudobulk.results
+            ],
+            "test_count": paired_cluster_pseudobulk.test_count,
+            "min_p_value_adj": paired_cluster_pseudobulk.min_p_value_adj,
+        }
 
     artifacts = Artifacts(
         qc=qc,
@@ -937,6 +1026,7 @@ def run(config: Config) -> List[str]:
         pseudobulk_gene_set_scores=pseudobulk_gene_set_scores,
         differential_abundance=differential_abundance,
         cluster_pseudobulk=cluster_pseudobulk,
+        paired_cluster_pseudobulk=paired_cluster_pseudobulk,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障
