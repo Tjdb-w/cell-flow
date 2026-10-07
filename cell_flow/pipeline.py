@@ -34,7 +34,7 @@ from .metadata import read_metadata
 from .mtx import read_mtx_directory
 from .normalize import normalize_and_select_hvg
 from .output import Artifacts, publish_results
-from .pca import MAX_PCS, run_pca
+from .pca import MAX_PCS, PCALoadings, compute_pca_loadings, run_pca
 from .pseudobulk_gene_sets import (
     PseudobulkGeneSetScores,
     score_pseudobulk_gene_sets,
@@ -93,6 +93,7 @@ class Config:
     pseudobulk_gene_set_de: bool = False
     differential_abundance: bool = False
     cluster_pseudobulk_de: bool = False
+    pca_loadings: bool = False
 
     @property
     def auto_clusters(self) -> bool:
@@ -149,6 +150,9 @@ class Config:
         if self.cluster_pseudobulk_de:
             # 仅显式启用簇内 pseudobulk 差异表达时记录；未启用时与基线一致
             parameters["cluster_pseudobulk_de"] = True
+        if self.pca_loadings:
+            # 仅显式启用 PCA 载荷输出时记录；未启用时 parameters 与基线一致
+            parameters["pca_loadings"] = True
         return parameters
 
 
@@ -225,6 +229,8 @@ def validate_config(config: Config) -> None:
         errors.append("--differential-abundance 需与 --replicate-metadata 同时使用")
     if not isinstance(config.cluster_pseudobulk_de, bool):
         errors.append("--cluster-pseudobulk-de 必须是无值开关参数")
+    if not isinstance(config.pca_loadings, bool):
+        errors.append("--pca-loadings 必须是无值开关参数")
     if config.cluster_pseudobulk_de and config.replicate_metadata_path is None:
         # 簇内 pseudobulk 差异表达建立在 --replicate-metadata 样本分组基线上
         errors.append(
@@ -444,6 +450,13 @@ def run(config: Config) -> List[str]:
                 f"但数据仅能支撑 {n_found_clusters} 个不同簇（方差不足）"
             )
         selection = None
+
+    # 可选 PCA 载荷：沿用本次 PCA 的最终细胞、高变基因顺序与分析表达值，
+    # 按最终（符号约定后）细胞得分与解释方差计算带符号载荷；纯增量计算，
+    # 不回写任何既有中间结果，未启用时 pca_loadings 为 None
+    pca_loadings: Optional[PCALoadings] = None
+    if config.pca_loadings:
+        pca_loadings = compute_pca_loadings(normalized, pca)
 
     # 可选聚类稳定性分析：以完整数据的本次聚类标签为参照，对最终保留细胞
     # （analysis_qc.kept_cells，与 clustering.labels 列序一致）不放回抽样，
@@ -910,6 +923,7 @@ def run(config: Config) -> List[str]:
         markers=markers,
         pairwise_markers=pairwise_markers,
         run_info=run_info,
+        pca_loadings=pca_loadings,
         cluster_selection=selection,
         group_markers=group_markers,
         batch_summary=batch_summary,

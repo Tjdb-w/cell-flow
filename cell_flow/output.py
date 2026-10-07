@@ -31,7 +31,7 @@ from .gene_sets import GeneSetScores
 from .kmeans import KMeansResult
 from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
-from .pca import PCAResult
+from .pca import PCALoadings, PCAResult
 from .pseudobulk_gene_sets import PseudobulkGeneSetScores
 from .qc import QCResult
 from .replicate import PseudobulkData
@@ -44,6 +44,7 @@ from .stability import (
 )
 
 TOP_N_MARKERS = 20
+TOP_N_LOADINGS = 20
 HIST_BINS = 20
 
 
@@ -69,6 +70,7 @@ class Artifacts:
     markers: Dict[int, List[MarkerRecord]]
     pairwise_markers: List[Tuple[int, int, List[PairwiseMarkerRecord]]]
     run_info: Dict[str, Any]
+    pca_loadings: Optional[PCALoadings] = None
     cluster_selection: Optional[ClusterSelectionResult] = None
     group_markers: Optional[List[GroupComparison]] = None
     batch_summary: Optional[List[BatchSummaryRow]] = None
@@ -367,6 +369,48 @@ def _pca_variance_tsv(pca: PCAResult) -> str:
                 ]
             )
         )
+    return "\n".join(lines) + "\n"
+
+
+def _pca_loadings_tsv(loadings: PCALoadings) -> str:
+    """高变基因（既有选择顺序）× PC1..PCn 的带符号载荷宽表。"""
+    header = ["gene_id"] + [f"PC{k + 1}" for k in range(loadings.n_pcs)]
+    lines = [tsv_row(header)]
+    for j, gene_id in enumerate(loadings.gene_ids):
+        row = [gene_id] + [fmt_float(value) for value in loadings.loadings[j]]
+        lines.append(tsv_row(row))
+    return "\n".join(lines) + "\n"
+
+
+def _pca_loading_chart_tsv(loadings: PCALoadings) -> str:
+    """每个 PC 取绝对载荷最大的前 20 个高变基因。
+
+    rank 自 1 起在每个 PC 内单独编号；绝对载荷并列时按 gene_id 升序。
+    contribution 为该基因载荷平方除以该 PC 全部载荷平方和，分母为 0 时取 0。
+    """
+    lines = [tsv_row(["component", "rank", "gene_id", "loading", "contribution"])]
+    n_genes = len(loadings.gene_ids)
+    for k in range(loadings.n_pcs):
+        column = [loadings.loadings[j][k] for j in range(n_genes)]
+        total_sq = sum(value * value for value in column)
+        order = sorted(
+            range(n_genes),
+            key=lambda j: (-abs(column[j]), loadings.gene_ids[j]),
+        )
+        for rank, j in enumerate(order[:TOP_N_LOADINGS], start=1):
+            value = column[j]
+            contribution = value * value / total_sq if total_sq > 0.0 else 0.0
+            lines.append(
+                tsv_row(
+                    [
+                        f"PC{k + 1}",
+                        rank,
+                        loadings.gene_ids[j],
+                        fmt_float(value),
+                        fmt_float(contribution),
+                    ]
+                )
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -1509,6 +1553,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         "pairwise_marker_chart.tsv",
         "normalized_expression.tsv",
     ]
+    if artifacts.pca_loadings is not None:
+        # 仅 --pca-loadings 运行产出载荷产物；未启用时文件集与基线一致
+        final_names.append("pca_loadings.tsv")
+        final_names.append("pca_loading_chart.tsv")
     if artifacts.cluster_selection is not None:
         # 仅 --n-clusters auto 产出候选评估表；显式整数模式文件集与基线一致
         final_names.append("cluster_selection.tsv")
@@ -1618,6 +1666,16 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
             _normalized_expression_tsv(artifacts.data),
         ),
     ]
+    if artifacts.pca_loadings is not None:
+        payload.append(
+            ("pca_loadings.tsv", _pca_loadings_tsv(artifacts.pca_loadings))
+        )
+        payload.append(
+            (
+                "pca_loading_chart.tsv",
+                _pca_loading_chart_tsv(artifacts.pca_loadings),
+            )
+        )
     if artifacts.cluster_selection is not None:
         payload.append(
             (

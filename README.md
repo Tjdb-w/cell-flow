@@ -584,6 +584,34 @@ Benjamini-Hochberg 校正。集合在文件中的成员总数（含矩阵外、�
 `OutputPathError`（退出码 5）。未启用 `--enrich-markers` 时全部既有行为、
 TSV/MTX 读取与 gzip 处理与基线逐字节一致。
 
+### `--pca-loadings`（可选，PCA 基因载荷）
+
+`--pca-loadings` 是无值开关，只接受无值形式且至多出现一次；写成
+`--pca-loadings=true` 等带值形式、重复出现或夹带未知参数一律报配置错误
+（退出码 3）。未启用时全部既有结果文件与 `run.json` 与基线逐字节一致。
+
+启用后沿用 PCA 实际使用的最终细胞、高变基因顺序与分析表达值（批次均值
+中心化后用校正值，否则用 log 归一化值），为每个主成分计算高变基因的
+带符号载荷：基因在某 PCk 上的载荷为其中心化表达向量与 PCk 细胞得分
+向量的内积除以该 PC 解释方差的平方根；解释方差为 0 时该 PC 载荷全部
+取 0。这是纯增量计算，不改变聚类、差异表达等任何既有口径。
+
+新增两个结果文件（与既有文件一起事务性发布）：
+
+- `pca_loadings.tsv`：第一列 `gene_id`，随后 `PC1` 到 `PCn` 载荷列；
+  高变基因保持既有选择顺序，浮点最短往返表示。
+- `pca_loading_chart.tsv`：列为 `component`、`rank`、`gene_id`、
+  `loading`、`contribution`；每个 PC 取绝对载荷最大的前 20 个高变基因，
+  `rank` 自 1 起，绝对载荷并列时按 `gene_id` 升序；`contribution` 为该
+  基因载荷平方除以该 PC 全部载荷平方和，分母为 0 时取 0。
+
+`run.json` 的 `parameters` 增加 `"pca_loadings": true`，既有字段与输出
+保持原语义。该开关可与 TSV/MTX/gzip 输入、`--metadata`、`--batch-metadata`、
+`--cell-metadata`、`--gene-sets`、`--detect-doublets`、`--stability-analysis`、
+`--cell-type-reference` 等既有可选项并用。PCA 无法成立仍报数据错误
+（退出码 4），输入或配置错误沿用退出码 2、3，目标目录非空或写出发布
+失败报 `OutputPathError`（退出码 5）；失败不创建或改动结果目录。
+
 ## 约定
 - 公开行为以 README 与源码为准。
 - 后续需求在此基线上增量实现。

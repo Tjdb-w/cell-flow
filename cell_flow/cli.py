@@ -15,7 +15,8 @@
         [--pseudobulk-gene-set-de] [--differential-abundance] \\
         [--cluster-pseudobulk-de] \\
         [--stability-analysis] [--stability-n-samples 100] \\
-        [--stability-sample-fraction 0.8] [--stability-seed 20240617]
+        [--stability-sample-fraction 0.8] [--stability-seed 20240617] \\
+        [--pca-loadings]
 """
 
 import sys
@@ -49,6 +50,7 @@ USAGE = (
     "                [--cluster-pseudobulk-de]\n"
     "                [--stability-analysis] [--stability-n-samples N]\n"
     "                [--stability-sample-fraction F] [--stability-seed N]\n"
+    "                [--pca-loadings]\n"
     "      cell-flow --version"
 )
 
@@ -154,6 +156,7 @@ def _build_analyze_config(options: dict) -> Config:
         pseudobulk_gene_set_de=bool(options.get("pseudobulk_gene_set_de")),
         differential_abundance=bool(options.get("differential_abundance")),
         cluster_pseudobulk_de=bool(options.get("cluster_pseudobulk_de")),
+        pca_loadings=bool(options.get("pca_loadings")),
     )
 
 
@@ -202,6 +205,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--pseudobulk-gene-set-de": "pseudobulk_gene_set_de",
         "--differential-abundance": "differential_abundance",
         "--cluster-pseudobulk-de": "cluster_pseudobulk_de",
+        "--pca-loadings": "pca_loadings",
     }
     options = {
         "input_format": "tsv",
@@ -243,7 +247,11 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
             index += 2
             continue
         if token in flag_options:
-            options[flag_options[token]] = True
+            flag_key = flag_options[token]
+            if flag_key == "pca_loadings" and options.get(flag_key):
+                # --pca-loadings 只接受无值形式且至多出现一次
+                raise _fail_usage("参数 --pca-loadings 重复出现")
+            options[flag_key] = True
             index += 1
             continue
         raise _fail_usage(f"无法识别的参数或多余位置参数：{token}")

@@ -23,6 +23,27 @@ class PCAResult:
     cell_ids: List[str]
 
 
+@dataclass(frozen=True)
+class PCALoadings:
+    n_pcs: int
+    gene_ids: List[str]          # 高变基因（与 PCA 实际使用的选择顺序一致）
+    loadings: List[List[float]]  # loadings[gene][pc]，带符号载荷
+
+
+def _center_selected(data: NormalizedData) -> List[List[float]]:
+    """中心化的细胞 x 高变基因矩阵（批次校正时基于校正值）。"""
+    selected = data.selected_genes
+    n_cells = len(data.cell_ids)
+    n_hvg = len(selected)
+    centered: List[List[float]] = [[0.0] * n_hvg for _ in range(n_cells)]
+    for j, g in enumerate(selected):
+        row = data.analysis_values[g]
+        mu = sum(row) / n_cells
+        for c in range(n_cells):
+            centered[c][j] = row[c] - mu
+    return centered
+
+
 def run_pca(data: NormalizedData, n_pcs: int = MAX_PCS) -> PCAResult:
     selected = data.selected_genes
     n_cells = len(data.cell_ids)
@@ -34,12 +55,7 @@ def run_pca(data: NormalizedData, n_pcs: int = MAX_PCS) -> PCAResult:
         raise ValueError("PCA 无法成立：主成分数为 0")
 
     # 中心化的细胞 x 高变基因矩阵（批次校正时基于校正值）
-    centered: List[List[float]] = [[0.0] * n_hvg for _ in range(n_cells)]
-    for j, g in enumerate(selected):
-        row = data.analysis_values[g]
-        mu = sum(row) / n_cells
-        for c in range(n_cells):
-            centered[c][j] = row[c] - mu
+    centered = _center_selected(data)
 
     # 细胞 x 细胞协方差（1/(n-1) 缩放对特征向量无影响，仅影响特征值）
     cov = [[0.0] * n_cells for _ in range(n_cells)]
@@ -88,3 +104,30 @@ def run_pca(data: NormalizedData, n_pcs: int = MAX_PCS) -> PCAResult:
         explained_variance=explained,
         cell_ids=list(data.cell_ids),
     )
+
+
+def compute_pca_loadings(data: NormalizedData, pca: PCAResult) -> PCALoadings:
+    """高变基因在各主成分上的带符号载荷。
+
+    沿用 PCA 实际使用的最终细胞、高变基因顺序与分析表达值（批次均值
+    中心化后用校正值，否则用 log 归一化值）。基因 g 在 PCk 上的载荷为
+    其中心化表达向量与 PCk 细胞得分向量的内积除以解释方差的平方根；
+    解释方差为 0 时该主成分载荷全部取 0。
+    """
+    selected = data.selected_genes
+    n_cells = len(data.cell_ids)
+    centered = _center_selected(data)
+    gene_ids = [data.gene_ids[g] for g in selected]
+    loadings: List[List[float]] = [[0.0] * pca.n_pcs for _ in selected]
+    for k in range(pca.n_pcs):
+        variance = pca.explained_variance[k]
+        if variance <= 0.0:
+            # 解释方差为 0：该 PC 载荷全部保持 0
+            continue
+        denom = math.sqrt(variance)
+        for j in range(len(selected)):
+            dot = 0.0
+            for c in range(n_cells):
+                dot += centered[c][j] * pca.scores[c][k]
+            loadings[j][k] = dot / denom
+    return PCALoadings(n_pcs=pca.n_pcs, gene_ids=gene_ids, loadings=loadings)
