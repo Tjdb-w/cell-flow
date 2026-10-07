@@ -23,7 +23,8 @@ pseudobulk 基因集分组差异通过 `--pseudobulk-gene-set-de` 无值开关�
 （仅在提供 `--replicate-metadata` 时生效）；
 最终簇内按生物学重复汇总的 pseudobulk 差异表达通过
 `--cluster-pseudobulk-de` 无值开关启用（仅在提供
-`--replicate-metadata` 时生效）。
+`--replicate-metadata` 时生效）；
+PCA 高变基因载荷通过 `--pca-loadings` 无值开关启用。
 `--key value` 与 `--key=value` 两种写法均支持。跨样本批次校正见下文
 `--cell-metadata`。
 
@@ -583,6 +584,40 @@ Benjamini-Hochberg 校正。集合在文件中的成员总数（含矩阵外、�
 报数据错误（退出码 4）；目录非空或暂存、写出、发布失败报
 `OutputPathError`（退出码 5）。未启用 `--enrich-markers` 时全部既有行为、
 TSV/MTX 读取与 gzip 处理与基线逐字节一致。
+
+### `--pca-loadings`（可选，PCA 基因载荷）
+
+`--pca-loadings` 是无值开关，为 PCA 增加可解释的高变基因载荷，使主成分
+坐标可追溯到具体高变基因；它是对既有流程的增量补充，不替换聚类或差异
+表达口径。开关只接受无值形式：写成 `--pca-loadings=true` 等带值形式、
+重复出现、或夹带未知参数一律报配置错误（退出码 3）。未启用时全部既有
+结果文件逐字节不变（`run.json` 同样不新增任何字段）。
+
+启用后沿用 PCA 实际使用的最终细胞、高变基因顺序与分析表达值：有批次
+均值中心化（`--batch-metadata` 或 `--cell-metadata` 的实际校正）时用
+校正值，否则用 log 归一化值。对每个 PCk，按 PCA 细胞得分与解释方差
+计算高变基因 g 的带符号载荷：
+
+`loading(g, k) = sum_c (x_gc - mean_g) * score_ck / sqrt(explained_variance_k)`
+
+其中 `x_gc` 为该基因的分析表达值、`score_ck` 为 PCk 的细胞得分；
+解释方差为 0 时该 PC 的全部载荷取 0。启用时在既有结果之外新增两个文件：
+
+- `pca_loadings.tsv`：第一列为 `gene_id`，随后按 `PC1` 到 `PCn` 排列
+  载荷列；行按高变基因的既有顺序排列，浮点用最短往返表示。
+- `pca_loading_chart.tsv`：每个 PC 取绝对载荷最大的前 20 个高变基因
+  （不足 20 个时取全部），列为 `component`、`rank`、`gene_id`、
+  `loading`、`contribution`。`component` 为 `PC1`..`PCn`，`rank` 从 1
+  开始，绝对载荷并列时按 `gene_id` 升序；`loading` 为带符号载荷；
+  `contribution` 为该基因载荷平方除以该 PC 全部高变基因载荷平方和，
+  分母为 0 时取 0。
+
+`run.json` 的 `parameters` 增加 `"pca_loadings": true`，其余既有字段与
+输出保持原语义。该开关可与 TSV、MTX、gzip、元数据、批次校正、基因集、
+双细胞、稳定性与注释等全部已有可选项并用。PCA 无法成立时继续按数据
+错误（退出码 4）处理，输入或配置错误沿用退出码 2、3，目标目录非空或
+写出发布失败沿用 `OutputPathError`（退出码 5）；任何失败都不创建或改动
+结果目录，成功时新增文件与既有文件一起事务性发布。
 
 ## 约定
 - 公开行为以 README 与源码为准。

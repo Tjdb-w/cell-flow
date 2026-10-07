@@ -13,7 +13,7 @@
         [--cell-type-reference <标记参考.tsv>] \\
         [--enrich-markers] [--enrichment-alpha F] [--enrichment-min-log-fc F] \\
         [--pseudobulk-gene-set-de] [--differential-abundance] \\
-        [--cluster-pseudobulk-de] \\
+        [--cluster-pseudobulk-de] [--pca-loadings] \\
         [--stability-analysis] [--stability-n-samples 100] \\
         [--stability-sample-fraction 0.8] [--stability-seed 20240617]
 """
@@ -46,7 +46,7 @@ USAGE = (
     "                [--enrich-markers] [--enrichment-alpha F]\n"
     "                [--enrichment-min-log-fc F]\n"
     "                [--pseudobulk-gene-set-de] [--differential-abundance]\n"
-    "                [--cluster-pseudobulk-de]\n"
+    "                [--cluster-pseudobulk-de] [--pca-loadings]\n"
     "                [--stability-analysis] [--stability-n-samples N]\n"
     "                [--stability-sample-fraction F] [--stability-seed N]\n"
     "      cell-flow --version"
@@ -154,6 +154,7 @@ def _build_analyze_config(options: dict) -> Config:
         pseudobulk_gene_set_de=bool(options.get("pseudobulk_gene_set_de")),
         differential_abundance=bool(options.get("differential_abundance")),
         cluster_pseudobulk_de=bool(options.get("cluster_pseudobulk_de")),
+        pca_loadings=bool(options.get("pca_loadings")),
     )
 
 
@@ -202,6 +203,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--pseudobulk-gene-set-de": "pseudobulk_gene_set_de",
         "--differential-abundance": "differential_abundance",
         "--cluster-pseudobulk-de": "cluster_pseudobulk_de",
+        "--pca-loadings": "pca_loadings",
     }
     options = {
         "input_format": "tsv",
@@ -224,6 +226,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
     }
 
     explicit = set()
+    seen_flags = set()
     index = 0
     while index < len(argv):
         token = argv[index]
@@ -243,7 +246,12 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
             index += 2
             continue
         if token in flag_options:
-            options[flag_options[token]] = True
+            flag_key = flag_options[token]
+            if flag_key == "pca_loadings" and flag_key in seen_flags:
+                # --pca-loadings 只接受无值形式且不可重复；重复出现属配置错误
+                raise _fail_usage(f"参数 {token} 重复出现")
+            seen_flags.add(flag_key)
+            options[flag_key] = True
             index += 1
             continue
         raise _fail_usage(f"无法识别的参数或多余位置参数：{token}")

@@ -29,6 +29,7 @@ from .errors import CellFlowConfigError, CellFlowDataError, CellFlowError
 from .gene_sets import read_gene_sets, score_gene_sets
 from .io import ExpressionMatrix, read_matrix
 from .kmeans import kmeans
+from .loadings import PCALoadings, compute_loadings
 from .markers import find_group_markers, find_markers, find_pairwise_markers
 from .metadata import read_metadata
 from .mtx import read_mtx_directory
@@ -93,6 +94,7 @@ class Config:
     pseudobulk_gene_set_de: bool = False
     differential_abundance: bool = False
     cluster_pseudobulk_de: bool = False
+    pca_loadings: bool = False
 
     @property
     def auto_clusters(self) -> bool:
@@ -149,6 +151,9 @@ class Config:
         if self.cluster_pseudobulk_de:
             # 仅显式启用簇内 pseudobulk 差异表达时记录；未启用时与基线一致
             parameters["cluster_pseudobulk_de"] = True
+        if self.pca_loadings:
+            # 仅显式启用 PCA 基因载荷时记录；未启用时 parameters 与基线一致
+            parameters["pca_loadings"] = True
         return parameters
 
 
@@ -230,6 +235,8 @@ def validate_config(config: Config) -> None:
         errors.append(
             "--cluster-pseudobulk-de 需与 --replicate-metadata 同时使用"
         )
+    if not isinstance(config.pca_loadings, bool):
+        errors.append("--pca-loadings 必须是无值开关参数")
     if config.cell_metadata_path is not None:
         if config.batch_metadata_path is not None:
             errors.append("--cell-metadata 与 --batch-metadata 不能同时使用")
@@ -444,6 +451,13 @@ def run(config: Config) -> List[str]:
                 f"但数据仅能支撑 {n_found_clusters} 个不同簇（方差不足）"
             )
         selection = None
+
+    # 可选 PCA 基因载荷：沿用实际成立的 PCA 的最终细胞、高变基因顺序与
+    # 分析表达值（有批次校正取中心化校正值，否则取 log 归一化值）。仅在
+    # --pca-loadings 启用时计算；未启用时不引入任何计算或产物。
+    pca_loadings: Optional[PCALoadings] = None
+    if config.pca_loadings:
+        pca_loadings = compute_loadings(normalized, pca)
 
     # 可选聚类稳定性分析：以完整数据的本次聚类标签为参照，对最终保留细胞
     # （analysis_qc.kept_cells，与 clustering.labels 列序一致）不放回抽样，
@@ -923,6 +937,7 @@ def run(config: Config) -> List[str]:
         pseudobulk_gene_set_scores=pseudobulk_gene_set_scores,
         differential_abundance=differential_abundance,
         cluster_pseudobulk=cluster_pseudobulk,
+        pca_loadings=pca_loadings,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障
