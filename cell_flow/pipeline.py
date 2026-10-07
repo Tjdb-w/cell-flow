@@ -73,6 +73,7 @@ from .stability import (
     summarize_scores,
     validate_stability_settings,
 )
+from .umap import UMAPResult, compute_umap
 
 DEFAULT_SEED = 20240617
 AUTO = "auto"
@@ -120,6 +121,7 @@ class Config:
     cluster_pseudobulk_adjusted_de: bool = False
     pseudobulk_numeric_covariates_path: Optional[str] = None
     pca_loadings: bool = False
+    umap: bool = False
 
     @property
     def auto_clusters(self) -> bool:
@@ -190,6 +192,9 @@ class Config:
         if self.pca_loadings:
             # 仅显式启用 PCA 载荷输出时记录；未启用时 parameters 与基线一致
             parameters["pca_loadings"] = True
+        if self.umap:
+            # 仅显式启用二维邻域嵌入时记录；未启用时 parameters 与基线一致
+            parameters["umap"] = True
         return parameters
 
 
@@ -270,6 +275,8 @@ def validate_config(config: Config) -> None:
         errors.append("--paired-cluster-pseudobulk-de 必须是无值开关参数")
     if not isinstance(config.pca_loadings, bool):
         errors.append("--pca-loadings 必须是无值开关参数")
+    if not isinstance(config.umap, bool):
+        errors.append("--umap 必须是无值开关参数")
     if config.cluster_pseudobulk_de and config.replicate_metadata_path is None:
         # 簇内 pseudobulk 差异表达建立在 --replicate-metadata 样本分组基线上
         errors.append(
@@ -571,6 +578,18 @@ def run(config: Config) -> List[str]:
     pca_loadings: Optional[PCALoadings] = None
     if config.pca_loadings:
         pca_loadings = compute_pca_loadings(normalized, pca)
+
+    # 可选二维邻域嵌入：只用本次 PCA 的最终细胞得分，邻居数取 15 与细胞数
+    # 减一的较小值，随机初值、负样本与更新顺序只来自 --seed 派生的随机流；
+    # 纯增量计算，不回写任何既有中间结果，未启用时 umap_result 为 None
+    umap_result: Optional[UMAPResult] = None
+    if config.umap:
+        try:
+            umap_result = compute_umap(
+                pca.scores, pca.cell_ids, seed=config.seed
+            )
+        except ValueError as exc:
+            raise CellFlowDataError(f"UMAP 嵌入无法成立：{exc}") from exc
 
     # 可选聚类稳定性分析：以完整数据的本次聚类标签为参照，对最终保留细胞
     # （analysis_qc.kept_cells，与 clustering.labels 列序一致）不放回抽样，
@@ -1232,6 +1251,16 @@ def run(config: Config) -> List[str]:
                 numeric_covariate_cluster_pseudobulk.min_p_value_adj
             ),
         }
+    if umap_result is not None:
+        # 二维邻域嵌入汇总：实际邻居数、有向邻域记录数与优化迭代轮数；
+        # 仅显式启用 --umap 时出现，既有字段不变
+        run_info["umap"] = {
+            "n_neighbors": umap_result.n_neighbors,
+            "n_neighbor_records": sum(
+                len(records) for records in umap_result.neighbors
+            ),
+            "n_iterations": umap_result.n_iterations,
+        }
 
     artifacts = Artifacts(
         qc=qc,
@@ -1258,6 +1287,7 @@ def run(config: Config) -> List[str]:
         paired_cluster_pseudobulk=paired_cluster_pseudobulk,
         adjusted_cluster_pseudobulk=adjusted_cluster_pseudobulk,
         numeric_covariate_cluster_pseudobulk=numeric_covariate_cluster_pseudobulk,
+        umap=umap_result,
     )
     # 全部计算已完成才触碰文件系统：预检与写出都在 publish_results 内，
     # 任一分析阶段失败时不会创建或改动目标目录；写出阶段任何文件系统故障

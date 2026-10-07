@@ -45,6 +45,7 @@ from .stability import (
     STABILITY_FILE_SUMMARY,
     StabilityResult,
 )
+from .umap import UMAPResult
 
 TOP_N_MARKERS = 20
 TOP_N_LOADINGS = 20
@@ -92,6 +93,7 @@ class Artifacts:
     numeric_covariate_cluster_pseudobulk: Optional[
         NumericCovariateClusterPseudobulkDE
     ] = None
+    umap: Optional[UMAPResult] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -267,6 +269,46 @@ def _pca_scatter_tsv(pca: PCAResult, clustering: KMeansResult) -> str:
                 ]
             )
         )
+    return "\n".join(lines) + "\n"
+
+
+def _umap_embedding_tsv(umap: UMAPResult, clustering: KMeansResult) -> str:
+    """二维邻域嵌入坐标：细胞顺序与 pca_scatter.tsv 一致，cluster 为最终簇标签。"""
+    lines = [tsv_row(["cell_id", "UMAP1", "UMAP2", "cluster"])]
+    for c, cell_id in enumerate(umap.cell_ids):
+        x, y = umap.coords[c]
+        lines.append(
+            tsv_row(
+                [
+                    cell_id,
+                    fmt_float(x),
+                    fmt_float(y),
+                    clustering.labels[c],
+                ]
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _umap_neighbors_tsv(umap: UMAPResult) -> str:
+    """每个细胞的有向邻域记录：源细胞顺序与 pca_scatter.tsv 一致。
+
+    每个源细胞的邻居按 weight 降序、neighbor_id 升序排列（统计模块已定序），
+    rank 自 1 起在每个源细胞内连续编号；weight 为对称化后的模糊连接强度。
+    """
+    lines = [tsv_row(["cell_id", "neighbor_id", "weight", "rank"])]
+    for cell_id, records in zip(umap.cell_ids, umap.neighbors):
+        for rank, record in enumerate(records, start=1):
+            lines.append(
+                tsv_row(
+                    [
+                        cell_id,
+                        record.neighbor_id,
+                        fmt_float(record.weight),
+                        rank,
+                    ]
+                )
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -1926,6 +1968,10 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         # 仅 --cell-type-reference 运行产出注释产物；未提供时文件集不变
         final_names.append("cluster_annotations.tsv")
         final_names.append("cluster_annotation_chart.tsv")
+    if artifacts.umap is not None:
+        # 仅 --umap 运行产出二维邻域嵌入产物；未启用时文件集与基线一致
+        final_names.append("umap_embedding.tsv")
+        final_names.append("umap_neighbors.tsv")
     stability_payload: List[Tuple[str, str]] = []
     if artifacts.stability is not None:
         # 仅 --stability-analysis 运行产出三个稳定性文件；未启用时文件集不变
@@ -2222,6 +2268,16 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                     artifacts.clustering,
                 ),
             )
+        )
+    if artifacts.umap is not None:
+        payload.append(
+            (
+                "umap_embedding.tsv",
+                _umap_embedding_tsv(artifacts.umap, artifacts.clustering),
+            )
+        )
+        payload.append(
+            ("umap_neighbors.tsv", _umap_neighbors_tsv(artifacts.umap))
         )
     payload.extend(stability_payload)
     payload.append(("run.json", _run_json(artifacts.run_info)))

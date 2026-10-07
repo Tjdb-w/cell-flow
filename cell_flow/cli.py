@@ -21,7 +21,7 @@
         [--pseudobulk-numeric-covariates <数值样本协变量.tsv>] \\
         [--stability-analysis] [--stability-n-samples 100] \\
         [--stability-sample-fraction 0.8] [--stability-seed 20240617] \\
-        [--pca-loadings]
+        [--pca-loadings] [--umap]
 """
 
 import sys
@@ -60,7 +60,7 @@ USAGE = (
     "                [--pseudobulk-numeric-covariates <数值样本协变量.tsv>]\n"
     "                [--stability-analysis] [--stability-n-samples N]\n"
     "                [--stability-sample-fraction F] [--stability-seed N]\n"
-    "                [--pca-loadings]\n"
+    "                [--pca-loadings] [--umap]\n"
     "      cell-flow --version"
 )
 
@@ -190,6 +190,7 @@ def _build_analyze_config(options: dict) -> Config:
             options.get("cluster_pseudobulk_adjusted_de")
         ),
         pca_loadings=bool(options.get("pca_loadings")),
+        umap=bool(options.get("umap")),
     )
 
 
@@ -244,6 +245,7 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
         "--paired-cluster-pseudobulk-de": "paired_cluster_pseudobulk_de",
         "--cluster-pseudobulk-adjusted-de": "cluster_pseudobulk_adjusted_de",
         "--pca-loadings": "pca_loadings",
+        "--umap": "umap",
     }
     options = {
         "input_format": "tsv",
@@ -298,9 +300,9 @@ def _parse_analyze(argv: Sequence[str]) -> Config:
             continue
         if token in flag_options:
             flag_key = flag_options[token]
-            if flag_key == "pca_loadings" and options.get(flag_key):
-                # --pca-loadings 只接受无值形式且至多出现一次
-                raise _fail_usage("参数 --pca-loadings 重复出现")
+            if flag_key in ("pca_loadings", "umap") and options.get(flag_key):
+                # --pca-loadings/--umap 只接受无值形式且至多出现一次
+                raise _fail_usage(f"参数 {token} 重复出现")
             options[flag_key] = True
             index += 1
             continue
