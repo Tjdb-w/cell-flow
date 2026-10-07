@@ -32,6 +32,7 @@ from .gene_sets import GeneSetScores
 from .kmeans import KMeansResult
 from .markers import GroupComparison, MarkerRecord, PairwiseMarkerRecord
 from .normalize import NormalizedData
+from .numeric_cluster_pseudobulk import NumericCovariateClusterPseudobulkDE
 from .paired_cluster_pseudobulk import PairedClusterPseudobulkDE
 from .pca import PCALoadings, PCAResult
 from .pseudobulk_gene_sets import PseudobulkGeneSetScores
@@ -88,6 +89,9 @@ class Artifacts:
     cluster_pseudobulk: Optional[ClusterPseudobulkDE] = None
     paired_cluster_pseudobulk: Optional[PairedClusterPseudobulkDE] = None
     adjusted_cluster_pseudobulk: Optional[AdjustedClusterPseudobulkDE] = None
+    numeric_covariate_cluster_pseudobulk: Optional[
+        NumericCovariateClusterPseudobulkDE
+    ] = None
 
 
 def _cells_tsv(qc: QCResult) -> str:
@@ -1173,6 +1177,105 @@ def _cluster_pseudobulk_adjusted_de_chart_tsv(
             )
     return "\n".join(lines) + "\n"
 
+def _cluster_pseudobulk_numeric_covariate_de_tsv(
+    result: NumericCovariateClusterPseudobulkDE,
+) -> str:
+    """最终簇内数值协变量的 pseudobulk 独立检验：前缀为 cluster、
+    comparison_type、group_a、group_b、covariate（被检验项：组别为 group，
+    否则为数值协变量列名）与 gene_id，统计列为该被检验项的系数及其
+    标准误、自由度、t、P 与校正 P。
+
+    行序按 cluster 升序，每簇先全部 one-vs-rest（group 升序，group_b 为空）
+    再全部 pairwise，与 cluster_pseudobulk_de.tsv 的比较次序一致；每个比较内
+    记录按校正 P 值升序、effect 降序、gene_id 升序排列（统计模块已定序）。
+    """
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "covariate",
+                "gene_id",
+                "effect",
+                "std_error",
+                "df",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for _, _, _, _, records in result.comparisons:
+        for r in records:
+            lines.append(
+                tsv_row(
+                    [
+                        r.cluster,
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        r.covariate,
+                        r.gene_id,
+                        fmt_float(r.effect),
+                        fmt_float(r.std_error),
+                        r.df,
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _cluster_pseudobulk_numeric_covariate_chart_tsv(
+    result: NumericCovariateClusterPseudobulkDE,
+) -> str:
+    """每个簇每项比较取差异表前 20 行：列与差异表一致，在 cluster 后加入
+    自 1 起、每比较内单独编号的 rank。"""
+    lines = [
+        tsv_row(
+            [
+                "cluster",
+                "rank",
+                "comparison_type",
+                "group_a",
+                "group_b",
+                "covariate",
+                "gene_id",
+                "effect",
+                "std_error",
+                "df",
+                "t_stat",
+                "p_value",
+                "p_value_adj",
+            ]
+        )
+    ]
+    for cluster, _, _, _, records in result.comparisons:
+        for rank, r in enumerate(records[:TOP_N_MARKERS], start=1):
+            lines.append(
+                tsv_row(
+                    [
+                        cluster,
+                        rank,
+                        r.comparison_type,
+                        r.group_a,
+                        r.group_b,
+                        r.covariate,
+                        r.gene_id,
+                        fmt_float(r.effect),
+                        fmt_float(r.std_error),
+                        r.df,
+                        fmt_float(r.t_stat),
+                        fmt_float(r.p_value),
+                        fmt_float(r.p_value_adj),
+                    ]
+                )
+            )
+    return "\n".join(lines) + "\n"
 
 
 def _normalized_expression_tsv(data: NormalizedData) -> str:
@@ -1809,6 +1912,12 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
         # 协变量校正的簇内 pseudobulk 差异表达产物；未启用时文件集不变
         final_names.append("cluster_pseudobulk_adjusted_de.tsv")
         final_names.append("cluster_pseudobulk_adjusted_de_chart.tsv")
+    if artifacts.numeric_covariate_cluster_pseudobulk is not None:
+        # 仅 --pseudobulk-numeric-covariates（必带 --replicate-metadata、
+        # --cluster-pseudobulk-de 与 --cluster-pseudobulk-adjusted-de）运行
+        # 产出数值协变量独立检验产物；未提供时文件集不变
+        final_names.append("cluster_pseudobulk_numeric_covariate_de.tsv")
+        final_names.append("cluster_pseudobulk_numeric_covariate_chart.tsv")
     if artifacts.doublets is not None:
         # 仅 --detect-doublets 运行产出双细胞评分产物；未启用时文件集不变
         final_names.append("doublet_scores.tsv")
@@ -2067,6 +2176,23 @@ def publish_results(output_dir: str, artifacts: Artifacts) -> List[str]:
                 "cluster_pseudobulk_adjusted_de_chart.tsv",
                 _cluster_pseudobulk_adjusted_de_chart_tsv(
                     artifacts.adjusted_cluster_pseudobulk
+                ),
+            )
+        )
+    if artifacts.numeric_covariate_cluster_pseudobulk is not None:
+        payload.append(
+            (
+                "cluster_pseudobulk_numeric_covariate_de.tsv",
+                _cluster_pseudobulk_numeric_covariate_de_tsv(
+                    artifacts.numeric_covariate_cluster_pseudobulk
+                ),
+            )
+        )
+        payload.append(
+            (
+                "cluster_pseudobulk_numeric_covariate_chart.tsv",
+                _cluster_pseudobulk_numeric_covariate_chart_tsv(
+                    artifacts.numeric_covariate_cluster_pseudobulk
                 ),
             )
         )

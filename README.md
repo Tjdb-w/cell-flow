@@ -516,6 +516,59 @@ Benjamini-Hochberg 校正。设计矩阵秩不足或残差自由度不大于零�
 目录。浮点格式沿用既有最短往返表示；相同输入、配置与 seed 下内容、
 排序、浮点文本与 `run.json` 逐字节一致。
 
+### `--pseudobulk-numeric-covariates`（可选，数值样本协变量的簇内 pseudobulk 独立检验）
+
+`--pseudobulk-numeric-covariates <路径>` 取数值型样本协变量表，仅在同时
+提供 `--replicate-metadata`、`--cluster-pseudobulk-de` 与
+`--cluster-pseudobulk-adjusted-de` 时可用，可与 `--pseudobulk-covariates`
+并用（分类协变量照常进入回归）。空路径、缺少任一基线、参数重复出现，
+一律报配置错误（退出码 3）。未提供该参数时，全部结果文件与 `run.json`
+与协变量校正基线逐字节一致。
+
+数值协变量表为 UTF-8 制表符文本或单成员 gzip（按 gzip 魔数识别，与文件
+名无关），首列恰为 `sample_id`，另有至少一个唯一命名的协变量列；每个
+`--replicate-metadata` 样本恰好一行，`sample_id` 唯一，全部字段非空且
+每个协变量取值都是可解析的有限浮点数（`nan`、`inf`、`-inf` 与不可解析
+文本一律拒绝），样本集合与重复元数据完全一致（不多不少）。文件不存在
+或不可读、表头不符、协变量列缺失或命名重复、列数不符、空字段、非法或
+非有限数值、样本重复、未覆盖全部重复样本、出现重复元数据之外的样本，
+或 gzip 多成员、尾随数据、截断、校验失败，一律报输入错误（退出码 2）。
+
+分析沿用簇内 pseudobulk 的保留范围、计数汇总、文库归一化与簇/比较枚举
+次序（簇升序，每簇先 one-vs-rest 再按 group 升序两两比较），是独立于
+`cluster_pseudobulk_adjusted_de.tsv` 的新检验，不改写任何既有结果。每个
+簇与每项比较只用该簇内的有效样本，以样本为观测对每个保留基因拟合线性
+模型：截距 + 组别项 + 每个分类协变量以其字典序最小水平为参照的哑变量
++ 每个数值协变量一个连续列（表头顺序）。对组别项与每个数值协变量列
+分别检验：系数即 `effect`，同时输出其标准误、残差自由度、t 统计量与
+双侧 P 值，并在每个簇比较内跨全部（保留基因 × 被检验项）记录做
+Benjamini-Hochberg 校正。设计矩阵秩不足或残差自由度不大于零时报数据
+错误（退出码 4），不产出结果、不触碰结果目录。启用时在既有结果之外
+新增两个文件（其余文件与不启用时逐字节一致，`run.json` 除外）：
+
+- `cluster_pseudobulk_numeric_covariate_de.tsv`：列为 `cluster`、
+  `comparison_type`、`group_a`、`group_b`（one-vs-rest 时为空）、
+  `covariate`（被检验项：组别为 `group`，否则为数值协变量列名）、
+  `gene_id`、`effect`、`std_error`、`df`、`t_stat`、`p_value`、
+  `p_value_adj`。行序按 `cluster` 升序，比较次序与
+  `cluster_pseudobulk_de.tsv` 一致；每项比较内按校正 P 值升序、
+  `effect` 降序、`gene_id` 升序排列。
+- `cluster_pseudobulk_numeric_covariate_chart.tsv`：每个簇每项比较取
+  差异表前 20 行，在 `cluster` 之后加入自 1 起、每比较内单独编号的
+  `rank`，其余列与差异表一致。
+
+`run.json` 的 `parameters` 增加
+`"cluster_pseudobulk_numeric_covariate_de": true`；`input` 新增
+`pseudobulk_numeric_covariates`，含 `name`、`sha256`（原始字节哈希）、
+`covariates`（数值协变量列名，表头顺序）与 `n_samples`；新增顶层
+`cluster_pseudobulk_numeric_covariate_de` 汇总，含 `covariates`、
+`tested_clusters`（升序）、`skipped_clusters`（升序）、
+`comparison_count`、`test_count`（全部簇/比较/被检验项/基因检验数）与
+`min_p_value_adj`（全部检验中的最小校正 P 值）。目录非空或暂存、写出、
+发布失败报 `OutputPathError`（退出码 5），任何失败都不创建或改动结果
+目录。浮点格式沿用既有最短往返表示；相同输入、配置与 seed 下内容、
+排序、浮点文本与 `run.json` 逐字节一致。
+
 ### `--detect-doublets` / `--expected-doublet-rate`（可选，双细胞识别与过滤）
 
 `--detect-doublets` 是无值开关；`--expected-doublet-rate` 取 `[0, 1)` 内的
